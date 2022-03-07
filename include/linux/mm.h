@@ -670,6 +670,29 @@ static inline bool vma_is_shmem(struct vm_area_struct *vma) { return false; }
 
 int vma_is_stack_for_current(struct vm_area_struct *vma);
 
+/* It will clear the pte page->cow_pte_owner if vma is NULL, otherwise, it will
+ * store the vma that pte page belong for by determining pte page->cow_pte_owner
+ * is already set the vma or not.
+ */
+static inline bool set_cow_pte_owner(pmd_t *pmd, struct vm_area_struct *vma)
+{
+	struct page *page;
+	page = pmd_page(*pmd);
+	if (!vma) {
+		page->cow_pte_owner = NULL;
+		return true;
+	}
+	if (page->cow_pte_owner)
+		return false;
+	page->cow_pte_owner = vma;
+	return true;
+}
+
+static inline bool cow_pte_is_same(pmd_t *pmd, struct vm_area_struct *vma)
+{
+        return (pmd_page(*pmd)->cow_pte_owner == vma) ? true : false;
+}
+
 /* flush_tlb_range() takes a vma, not a mm, and can care about flags */
 #define TLB_FLUSH_VMA(mm,flags) { .vm_mm = (mm), .vm_flags = (flags) }
 
@@ -2327,6 +2350,7 @@ static inline bool pgtable_pte_page_ctor(struct page *page)
 	if (!ptlock_init(page))
 		return false;
 	__SetPageTable(page);
+	page->cow_pte_owner = NULL;
 	inc_lruvec_page_state(page, NR_PAGETABLE);
 	return true;
 }

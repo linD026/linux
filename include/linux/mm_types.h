@@ -148,7 +148,12 @@ struct page {
 		};
 		struct {	/* Page table pages */
 			unsigned long _pt_pad_1;	/* compound_head */
-			pgtable_t pmd_huge_pte; /* protected by page->ptl */
+			union {
+				/* protected by page->ptl */
+				pgtable_t pmd_huge_pte;
+				/* cow pte */
+				struct vm_area_struct *cow_pte_owner;
+			};
 			unsigned long _pt_pad_2;	/* mapping */
 			union {
 				struct mm_struct *pt_mm; /* x86 pgds only */
