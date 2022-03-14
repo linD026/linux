@@ -2639,6 +2639,10 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 
+	/* Disable the flag of parent cow on page table  */
+	if (current->mm)
+		clear_bit(MMF_COW_PGTABLE, &current->mm->flags);
+
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 
@@ -2659,6 +2663,10 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 		init_completion(&vfork);
 		get_task_struct(p);
 	}
+
+	/* Disable the flag of child cow on page table */
+	if (p->mm)
+		clear_bit(MMF_COW_PGTABLE, &p->mm->flags);
 
 	wake_up_new_task(p);
 
@@ -2716,6 +2724,24 @@ SYSCALL_DEFINE0(vfork)
 	};
 
 	return kernel_clone(&args);
+}
+#endif
+
+#ifdef __ARCH_WANT_SYS_FORK
+SYSCALL_DEFINE0(sfork)
+{
+#ifdef CONFIG_MMU
+	struct kernel_clone_args args = {
+		.exit_signal = SIGCHLD,
+	};
+
+	set_bit(MMF_COW_PGTABLE, &current->mm->flags);
+
+	return kernel_clone(&args);
+#else
+	/* can not support in nommu mode */
+	return -EINVAL;
+#endif
 }
 #endif
 

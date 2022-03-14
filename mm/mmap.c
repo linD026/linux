@@ -2709,6 +2709,8 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 			return err;
 	}
 
+	// TODO: handle cow page table
+
 	new = vm_area_dup(vma);
 	if (!new)
 		return -ENOMEM;

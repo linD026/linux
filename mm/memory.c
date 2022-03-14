@@ -247,6 +247,9 @@ static inline void free_pmd_range(struct mmu_gather *tlb, pud_t *pud,
 		next = pmd_addr_end(addr, end);
 		if (pmd_none_or_clear_bad(pmd))
 			continue;
+
+		// TODO: handle cow page table
+
 		free_pte_range(tlb, pmd, addr);
 	} while (pmd++, addr = next, addr != end);
 
@@ -1154,7 +1157,26 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		}
 		if (pmd_none_or_clear_bad(src_pmd))
 			continue;
-		if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
+
+		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)) {
+			if (src_vma->vm_flags & VM_WRITE)
+				pmdp_set_wrprotect(src_mm, addr, src_pmd);
+
+			/* if there doesn't have owner the parent need to
+			 * take this pte.
+			 */
+			if (cow_pte_is_same(src_pmd, NULL)) {
+				set_cow_pte_owner(src_pmd, src_vma);
+				pmd_get_pte(src_pmd);
+			}
+
+			/* Child reference count */
+			pmd_get_pte(src_pmd);
+
+			/* cow on page table */
+			set_pmd_at(dst_mm, addr, dst_pmd, *src_pmd);
+		}
+		else if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
 				   addr, next))
 			return -ENOMEM;
 	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
@@ -1494,6 +1516,10 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		 */
 		if (pmd_none_or_trans_huge_or_clear_bad(pmd))
 			goto next;
+
+		// TODO: handle_cow_pte()
+		// change ownership and refcount
+
 		next = zap_pte_range(tlb, vma, pmd, addr, next, details);
 next:
 		cond_resched();
@@ -4554,6 +4580,48 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
 	return VM_FAULT_FALLBACK;
 }
 
+void handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
+		unsigned long addr)
+{
+	pmd_t entry;
+	spinlock_t *ptl;
+	unsigned long end;
+
+	ptl = pmd_lock(vma->vm_mm, pmd);
+
+	/* If page->pte_refcount is 1, then we reset the pmd entry and pte page
+	 * , by cleaning up pte page->cow_pte_owner and making pmd entry
+	 * writable.
+	 *
+	 * else if vma and pmd are belong to same process and refcount is > 1,
+	 * which means vma and pmd are reference to same pte but some one also
+	 * reference this pte, we need to drop off the ownership.
+	 *
+	 * else we are not the owner, we can just copy the pte and decreace
+	 * refcount.
+	 */
+	if (cow_pte_refcount_read(pmd) == 1) {
+		set_cow_pte_owner(pmd, NULL);
+		entry = pmd_mkwrite(*pmd);
+		set_pmd_at(vma->vm_mm, addr, pmd, entry);
+		goto out;
+	}
+	else if (cow_pte_is_same(pmd, vma))
+		set_cow_pte_owner(pmd, NULL);
+
+	/* The situation here is pte page is not only belong to this process,
+	 * someone may also reference this pte page.
+	 * We need to copy the pte page (break cow).
+	 */
+	end = (addr + PMD_SIZE) & PMD_MASK;
+	copy_pte_range(vma, vma, &entry, pmd, addr, end);
+	set_pmd_at(vma->vm_mm, addr, pmd, pmd_mkwrite(entry));
+
+out:
+	pmd_put_pte(pmd);
+	spin_unlock(ptl);
+}
+
 /*
  * These routines also need to handle stuff like marking pages dirty
  * and/or accessed for architectures that don't do it in hardware (most
@@ -4758,6 +4826,15 @@ retry_pud:
 				return 0;
 			}
 		}
+
+		/* When the pmd entry is set at write protection,
+		 * it need to handle the on demand pte.
+		 * We will allocate new pte and copy old one to it,
+		 * then set this entry writeable and decrease the refcount at pte.
+		 */
+		if (vmf.flags & FAULT_FLAG_WRITE &&
+				pte_page_is_cowing(&vmf.orig_pmd))
+			handle_cow_pte(vmf.vma, vmf.pmd, vmf.address);
 	}
 
 	return handle_pte_fault(&vmf);
