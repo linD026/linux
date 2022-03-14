@@ -511,6 +511,9 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
 		old_pud = get_old_pud(vma->vm_mm, old_addr);
 		if (!old_pud)
 			continue;
+
+		// TODO: handle cow page table
+
 		new_pud = alloc_new_pud(vma->vm_mm, vma, new_addr);
 		if (!new_pud)
 			break;
