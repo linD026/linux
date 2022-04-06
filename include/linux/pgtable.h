@@ -600,8 +600,8 @@ static inline int pmd_put_pte(pmd_t *pmd)
 	return atomic_dec_return(&pmd_page(*pmd)->cow_pte_refcount);
 }
 
-extern void handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
-		unsigned long addr);
+extern int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
+		unsigned long addr, bool alloc);
 
 #ifndef pte_access_permitted
 #define pte_access_permitted(pte, write) \

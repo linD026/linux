@@ -704,6 +704,9 @@ static inline bool cow_pte_is_same(pmd_t *pmd, struct vm_area_struct *vma)
         return (pmd_page(*pmd)->cow_pte_owner == vma) ? true : false;
 }
 
+int break_cow_pte_range(struct vm_area_struct *vma, unsigned long start_address,
+		unsigned long end_address);
+
 /* flush_tlb_range() takes a vma, not a mm, and can care about flags */
 #define TLB_FLUSH_VMA(mm,flags) { .vm_mm = (mm), .vm_flags = (flags) }
 
