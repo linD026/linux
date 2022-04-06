@@ -1324,6 +1324,144 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 	return ret;
 }
 
+static inline int
+break_cow_pte_from_pmd(struct vm_area_struct *vma, pud_t *pud,
+		unsigned long addr, unsigned long end)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pmd_t *src_pmd, dst_pmd;
+	unsigned long next;
+
+	src_pmd = pmd_offset(pud, addr);
+	dst_pmd = *src_pmd;
+	do {
+		next = pmd_addr_end(addr, end);
+		if (is_swap_pmd(*src_pmd) || pmd_trans_huge(*src_pmd)
+			|| pmd_devmap(*src_pmd))
+			continue;
+		if (pmd_none_or_clear_bad(src_pmd))
+			continue;
+
+		if (cow_pte_refcount_read(src_pmd) == 1) {
+			set_cow_pte_owner(src_pmd, NULL);
+			dst_pmd = pmd_mkwrite(*src_pmd);
+			set_pmd_at(mm, addr, src_pmd, dst_pmd);
+			continue;
+		}
+		else if (cow_pte_is_same(src_pmd, vma))
+			set_cow_pte_owner(src_pmd, NULL);
+
+		/* There are others still using it, we need make copy */
+		// TODO: How to handle allocate fault?
+		if (copy_pte_range(vma, vma, &dst_pmd, src_pmd, addr, end))
+			return -ENOMEM;
+		set_pmd_at(mm, addr, src_pmd, pmd_mkwrite(dst_pmd));
+		pmd_put_pte(src_pmd);
+	} while (src_pmd++, dst_pmd = *src_pmd, addr = next, addr != end);
+	return 0;
+}
+
+static inline int
+break_cow_pte_from_pud(struct vm_area_struct *vma, p4d_t *p4d,
+		unsigned long addr, unsigned long end)
+{
+	pud_t *pud;
+	unsigned long next;
+
+	pud = pud_offset(p4d, addr);
+	do {
+		next = pud_addr_end(addr, end);
+		if (pud_trans_huge(*pud) || pud_devmap(*pud))
+			continue;
+		if (pud_none_or_clear_bad(pud))
+			continue;
+		if (break_cow_pte_from_pmd(vma, pud, addr, next))
+			return -ENOMEM;
+	} while (pud++, addr = next, addr != end);
+	return 0;
+}
+
+static inline int
+break_cow_pte_from_p4d(struct vm_area_struct *vma, pgd_t *pgd,
+		unsigned long addr, unsigned long end)
+{
+	p4d_t *p4d;
+	unsigned long next;
+
+	p4d = p4d_offset(pgd, addr);
+	do {
+		next = p4d_addr_end(addr, end);
+		if (p4d_none_or_clear_bad(p4d))
+			continue;
+		if (break_cow_pte_from_pud(vma, p4d, addr, next))
+			return -ENOMEM;
+	} while (p4d++, addr = next, addr != end);
+	return 0;
+}
+
+static inline int
+break_cow_pte_from_pgd(struct vm_area_struct *vma, unsigned long start_address,
+		unsigned long end_address)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	unsigned long next;
+	unsigned long addr = start_address;
+	unsigned long end = end_address;
+	pgd_t *pgd;
+	int ret = 0;
+
+	pgd = pgd_offset(mm, addr);
+	do {
+		next = pgd_addr_end(addr, end);
+		if (pgd_none_or_clear_bad(pgd))
+			continue;
+		if (unlikely(break_cow_pte_from_p4d(vma, pgd, addr, next))) {
+			ret = -ENOMEM;
+			break;
+		}
+	} while (pgd++, addr = next, addr != end);
+
+	return ret;
+}
+
+/* need hold the pgtable lock
+ * This handle all the address of vma.
+ * break_cow_pte() is different with handle_pmd_fault().
+ * This function used at unmmap/mremap/free/split of vma, it will reset all the
+ * share pte done for vma state.
+ * another one only deal with the specific address of pmd entry.
+ *
+ * TODO: really need this one?
+ * Use flags to determine the opeation after the abort share pte, so this
+ * function can do the fast path to them.
+ * - Free pgtable: usually decrease the refcount
+ *
+ * While some write in the cow pet at same time?
+ */
+int break_cow_pte_range(struct vm_area_struct *vma, unsigned long start_address,
+		unsigned long end_address)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int ret = 0;
+	unsigned long start = max(vma->vm_start, start_address);
+	unsigned long end;
+
+	if (start >= vma->vm_end)
+		return ret;
+	end = min(vma->vm_end, end_address);
+	if (end <= vma->vm_start)
+		return ret;
+
+	if (unlikely(is_vm_hugetlb_page(vma)))
+		return ret;
+
+	mmap_write_lock(mm);
+	ret = break_cow_pte_from_pgd(vma, start, end);
+	mmap_write_unlock(mm);
+
+	return ret;
+}
+
 /*
  * Parameter block passed down to zap_pte_range in exceptional cases.
  */
