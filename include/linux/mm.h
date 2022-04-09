@@ -670,6 +670,16 @@ static inline bool vma_is_shmem(struct vm_area_struct *vma) { return false; }
 
 int vma_is_stack_for_current(struct vm_area_struct *vma);
 
+static inline bool pte_page_is_cowing(pmd_t *pmd)
+{
+	return atomic_read(&pmd_page(*pmd)->cow_pte_refcount) > 1;
+}
+
+static inline int cow_pte_refcount_read(pmd_t *pmd)
+{
+	return atomic_read(&pmd_page(*pmd)->cow_pte_refcount);
+}
+
 /* It will clear the pte page->cow_pte_owner if vma is NULL, otherwise, it will
  * store the vma that pte page belong for by determining pte page->cow_pte_owner
  * is already set the vma or not.
@@ -2352,6 +2362,7 @@ static inline bool pgtable_pte_page_ctor(struct page *page)
 	__SetPageTable(page);
 	page->cow_pte_owner = NULL;
 	inc_lruvec_page_state(page, NR_PAGETABLE);
+	atomic_set(&page->cow_pte_refcount, 1);
 	return true;
 }
 

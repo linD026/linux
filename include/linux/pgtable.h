@@ -590,6 +590,16 @@ static inline int pte_unused(pte_t pte)
 }
 #endif
 
+static inline int pmd_get_pte(pmd_t *pmd)
+{
+	return atomic_inc_return(&pmd_page(*pmd)->cow_pte_refcount);
+}
+
+static inline int pmd_put_pte(pmd_t *pmd)
+{
+	return atomic_dec_return(&pmd_page(*pmd)->cow_pte_refcount);
+}
+
 #ifndef pte_access_permitted
 #define pte_access_permitted(pte, write) \
 	(pte_present(pte) && (!(write) || pte_write(pte)))
