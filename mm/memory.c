@@ -247,9 +247,6 @@ static inline void free_pmd_range(struct mmu_gather *tlb, pud_t *pud,
 		next = pmd_addr_end(addr, end);
 		if (pmd_none_or_clear_bad(pmd))
 			continue;
-
-		// TODO: handle cow page table
-
 		free_pte_range(tlb, pmd, addr);
 	} while (pmd++, addr = next, addr != end);
 
@@ -415,6 +412,8 @@ void free_pgtables(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		 */
 		unlink_anon_vmas(vma);
 		unlink_file_vma(vma);
+
+		break_cow_pte_range(vma, vma->vm_start, vma->vm_end);
 
 		if (is_vm_hugetlb_page(vma)) {
 			hugetlb_free_pgd_range(tlb, addr, vma->vm_end,
@@ -1655,8 +1654,8 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		if (pmd_none_or_trans_huge_or_clear_bad(pmd))
 			goto next;
 
-		// TODO: handle_cow_pte()
-		// change ownership and refcount
+		if (!pmd_write(*pmd) && pte_page_is_cowing(pmd))
+			handle_cow_pte(vma, pmd, addr);
 
 		next = zap_pte_range(tlb, vma, pmd, addr, next, details);
 next:

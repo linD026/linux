@@ -2717,7 +2717,7 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 			return err;
 	}
 
-	// TODO: handle cow page table
+	break_cow_pte_range(vma, addr, vma->vm_end);
 
 	new = vm_area_dup(vma);
 	if (!new)
