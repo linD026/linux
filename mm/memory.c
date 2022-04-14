@@ -247,9 +247,6 @@ static inline void free_pmd_range(struct mmu_gather *tlb, pud_t *pud,
 		next = pmd_addr_end(addr, end);
 		if (pmd_none_or_clear_bad(pmd))
 			continue;
-
-		// TODO: handle cow page table
-
 		free_pte_range(tlb, pmd, addr);
 	} while (pmd++, addr = next, addr != end);
 
@@ -1659,8 +1656,8 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		if (pmd_none_or_trans_huge_or_clear_bad(pmd))
 			goto next;
 
-		// TODO: handle_cow_pte()
-		// change ownership and refcount
+		if (pte_page_is_cowing(pmd))
+			handle_cow_pte(vma, pmd, addr, false);
 
 		next = zap_pte_range(tlb, vma, pmd, addr, next, details);
 next:
