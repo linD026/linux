@@ -2734,10 +2734,15 @@ SYSCALL_DEFINE0(sfork)
 	struct kernel_clone_args args = {
 		.exit_signal = SIGCHLD,
 	};
+	pid_t pid;
 
 	set_bit(MMF_COW_PGTABLE, &current->mm->flags);
 
-	return kernel_clone(&args);
+	printk("%s: start\n", __func__);
+	pid = kernel_clone(&args);
+	printk("%s: end\n", __func__);
+
+	return pid;
 #else
 	/* can not support in nommu mode */
 	return -EINVAL;
