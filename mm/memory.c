@@ -1015,7 +1015,9 @@ copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_
 	swp_entry_t entry = (swp_entry_t){0};
 	struct page *prealloc = NULL;
 
-	printk("%s: start\n", __func__);
+	printk("%s: address:%lx src_pmd:%lx, dst_pmd:%lx\n",
+			__func__, addr,
+			(unsigned long) src_pmd, (unsigned long) dst_pmd);
 
 again:
 	progress = 0;
@@ -1027,8 +1029,11 @@ again:
 		printk("%s: alloc pte failed\n", __func__);
 		goto out;
 	}
+	printk("%s: pte_alloc_map_lock\n", __func__);
 	src_pte = pte_offset_map(src_pmd, addr);
+	printk("%s: pte_lockptr\n", __func__);
 	src_ptl = pte_lockptr(src_mm, src_pmd);
+	printk("%s: spin_lock_nested\n", __func__);
 	spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 	orig_src_pte = src_pte;
 	orig_dst_pte = dst_pte;
@@ -1262,24 +1267,36 @@ out:
 
 static inline bool cow_pte_in_same(pmd_t *pmd, struct vm_area_struct *vma)
 {
-	return (pmd_page(*pmd)->cow_pte_owner->vm_mm == vma->vm_mm)? true : false;
+	return (pmd_page(*pmd)->cow_pte_owner->vm_mm == vma->vm_mm);
 }
 
 /* accept child fork.
  * but don't accept same pte cowing in one process
  */
-static inline bool cow_pte_is_accessible(pmd_t *pmd, struct vm_area_struct *vma)
+static inline bool cow_pte_is_acceptable(pmd_t *pmd, struct vm_area_struct *vma)
 {
-	// exclusive non-owner
-	if (!cow_pte_is_same(pmd, NULL)) {
-		// when its not the owner, we need to make sure
-		// this vma is not in the same process.
-		if (!cow_pte_is_same(pmd, vma) && cow_pte_in_same(pmd, vma)) {
-			printk("%s: pmd_onwer:%lx owner-mm::%lx, vma:%lx vma-mm:%lx\n",
+	/* exclusive non-owner
+	 * Its always find when the pte page doesn't have owner
+	 * we accept it when the vma is owner, since it might be fork
+	 * again.
+	 */
+	if (!cow_pte_is_same(pmd, NULL) && !cow_pte_is_same(pmd, vma)) {
+		/* when vma is not the owner, we need to make sure this vma is
+		 * not in the same process.
+		 */
+		if (cow_pte_in_same(pmd, vma)) {
+			printk("%s: pmd_owner:%lx owner-mm:%lx, vma:%lx vma-mm:%lx\n",
 				__func__,
 				(unsigned long) pmd_page(*pmd)->cow_pte_owner,
 				(unsigned long) pmd_page(*pmd)->cow_pte_owner->vm_mm,
 				(unsigned long) vma, (unsigned long) vma->vm_mm);
+			printk("%s: owner-start %lx owner-end:%lx, vma-start:%lx vma-end:%lx\n",
+				__func__,
+				pmd_page(*pmd)->cow_pte_owner->vm_start,
+				pmd_page(*pmd)->cow_pte_owner->vm_end,
+				vma->vm_start,
+				vma->vm_end
+				);
 			return false;
 		}
 	}
@@ -1317,11 +1334,24 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		if (pmd_none_or_clear_bad(src_pmd))
 			continue;
 
-		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags) &&
-			cow_pte_is_accessible(src_pmd, src_vma)) {
+		/* IF have owner and vma is not the owner
+		 * we can skip it.
+		 * Since, vma may overlap the previously pte that cowed already.
+		 */
+		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)){
 
-			if (src_vma->vm_flags & VM_WRITE)
+			/* when the address range of src_vma has ovelap previously cowed pte.
+			 * We need to skip the cow or copy, since it already copy it.
+			 * TODO: do this has any affect to the handle_cow_pte() (break cow)?
+			 */
+			if (!cow_pte_is_acceptable(src_pmd, src_vma))
+				continue;
+
+			if (src_vma->vm_flags & VM_WRITE) {
 				pmdp_set_wrprotect(src_mm, addr, src_pmd);
+				if (pmd_write(*src_pmd))
+					printk("%s: write protect unabled\n", __func__);
+			}
 
 			/* if there doesn't have owner the parent need to
 			 * take this pte.
@@ -1344,6 +1374,9 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 				(unsigned long)src_vma,
 				src_vma->vm_start, src_vma->vm_end);
 		}
+		else if (test_bit(MMF_COW_PGTABLE, &src_mm->flags) &&
+			copy_pte_range_sfork(dst_vma, src_vma, dst_pmd, src_pmd, addr, next))
+			return -ENOMEM;
 		else if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
 				   addr, next))
 			return -ENOMEM;
@@ -4897,6 +4930,10 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
  * If pmd is NULL, it will get the pmd from vma and check it is cowing.
  *
  * TODO: do we need lock here?
+ * TODO: The address need to be begin of the pte page, since odfork is cow
+ * entire pte. We need to deal with all the pte page not the subset of pte page.
+ *
+ * From [addr]----[end] to [start]----[end]
  */
 int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		unsigned long addr, bool alloc)
@@ -4906,7 +4943,7 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	pud_t *pud;
 	pmd_t cowed_entry, entry = { 0 };
 	struct mm_struct *mm = vma->vm_mm;
-	unsigned long end;
+	unsigned long start, end;
 	int refcount, ret = 0;
 	//spinlock_t *ptl = NULL;
 
@@ -4924,9 +4961,12 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		if (pud_none_or_clear_bad(pud))
 			return 0;
 		pmd = pmd_offset(pud, addr);
-		if (pmd_none_or_clear_bad(pmd) && !pte_page_is_cowing(pmd))
+		if (pmd_none_or_clear_bad(pmd) && pte_page_is_cowing(pmd))
 			return 0;
 	}
+
+	BUG_ON(pmd_none(*pmd));
+	BUG_ON(pte_page_is_cowing(pmd));
 
 	// ptl = pmd_lock(mm, pmd);
 
@@ -4953,23 +4993,27 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	else if (cow_pte_is_same(pmd, vma))
 		set_cow_pte_owner(pmd, NULL);
 
-	printk("%s: refcount %d, RET_IP %p, mm %p, pmd %lu\n",
+	printk("%s: refcount:%d RET_IP:%p mm:%p pmd:%lx\n",
 			__func__, refcount, (void *)_RET_IP_, mm, (unsigned long) pmd);
 
+
+	// TODO: need to consider the write protection
 	cowed_entry = *pmd;
+	*pmd = pmd_mkwrite(*pmd);
 
 	/* The situation here is pte page is not only belong to this process,
 	 * someone may also reference this pte page.
 	 * We need to copy the pte page (break cow).
 	 */
+	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
 	if (alloc) {
-		ret = copy_pte_range_sfork(vma, vma, &entry, pmd, addr, end);
+		ret = copy_pte_range_sfork(vma, vma, &entry, pmd, start, end);
 		if (ret)
 			goto out;
 		printk("%s: new pte page refcount %d\n", __func__,
 				cow_pte_refcount_read(&entry));
-		set_pmd_at(vma->vm_mm, addr, pmd, pmd_mkwrite(entry));
+		set_pmd_at(vma->vm_mm, addr, pmd, entry);
 	}
 	else
 		pmd_clear(pmd);
