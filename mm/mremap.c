@@ -534,8 +534,12 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
 		if (!old_pmd)
 			continue;
 
-		if (pte_page_is_cowing(old_pmd))
+		if (pte_page_is_cowing(old_pmd)) {
+			printk("%s: handle_cow_pte\n", __func__);
 			handle_cow_pte(vma, old_pmd, old_addr, true);
+			printk("%s: pmd none:%s\n", __func__,
+				pmd_none(*old_pmd) ? "true" : "false");
+		}
 
 		new_pmd = alloc_new_pmd(vma->vm_mm, vma, new_addr);
 		if (!new_pmd)
