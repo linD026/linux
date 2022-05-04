@@ -2709,8 +2709,10 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 			return err;
 	}
 
-	if (handle_cow_pte(vma, NULL, addr, true))
+	if (handle_cow_pte(vma, NULL, addr, true)) {
+		printk("%s: handle_cow_pte failed\n", __func__);
 		return -ENOMEM;
+	}
 
 	new = vm_area_dup(vma);
 	if (!new)
@@ -3141,6 +3143,7 @@ void exit_mmap(struct mm_struct *mm)
 	/* update_hiwater_rss(mm) here? but nobody should be looking */
 	/* Use -1 here to ensure all VMAs in the mm are unmapped */
 	unmap_vmas(&tlb, vma, 0, -1);
+	//printk("%s: vma%lx\n", __func__, (unsigned long) vma);
 	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb);
 

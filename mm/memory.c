@@ -1062,6 +1062,15 @@ page_copy_prealloc(struct mm_struct *src_mm, struct vm_area_struct *vma,
 	return new_page;
 }
 
+#define NAMED_ARRAY_INDEX(x)	[x] = __stringify(x)
+
+static const char * const resident_page_types[] = {
+	NAMED_ARRAY_INDEX(MM_FILEPAGES),
+	NAMED_ARRAY_INDEX(MM_ANONPAGES),
+	NAMED_ARRAY_INDEX(MM_SWAPENTS),
+	NAMED_ARRAY_INDEX(MM_SHMEMPAGES),
+};
+
 static int
 copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	       pmd_t *dst_pmd, pmd_t *src_pmd, unsigned long addr,
@@ -1076,6 +1085,7 @@ copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 	struct page *prealloc = NULL;
+	int i;
 
 	printk("%s: address:%lx src_pmd:%lx, dst_pmd:%lx\n",
 			__func__, addr,
@@ -1168,14 +1178,33 @@ again:
 		progress += 8;
 	} while (dst_pte++, src_pte++, addr += PAGE_SIZE, addr != end);
 
-	 printk("%s: end loop\n", __func__);
+	 printk("%s: end loop \n", __func__);
+
+	if (mm_pgtables_bytes(dst_mm))
+		printk("%s: non-zero pgtables_bytes dst_mm: %ld\n",
+				__func__, mm_pgtables_bytes(dst_mm));
+	if (mm_pgtables_bytes(src_mm))
+		printk("%s: non-zero pgtables_bytes src_mm: %ld\n",
+				__func__, mm_pgtables_bytes(src_mm));
 
 	arch_leave_lazy_mmu_mode();
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
+
+	for (i = 0; i < NR_MM_COUNTERS; i++) {
+		long dst_x = atomic_long_read(&dst_mm->rss_stat.count[i]);
+		long src_x = atomic_long_read(&src_mm->rss_stat.count[i]);
+		if (dst_x || src_x) {
+			printk("%s: src rss-counter state mm:%p type:%s val:%ld\n",
+				 __func__, src_mm, resident_page_types[i], src_x);
+			printk("%s: dst rss-counter state mm:%p type:%s val:%ld\n",
+				 __func__, dst_mm, resident_page_types[i], dst_x);
+		}
+	}
+
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
-	//cond_resched();
+	cond_resched();
 
 	if (ret == -EIO) {
 		VM_WARN_ON_ONCE(!entry.val);
@@ -1455,8 +1484,10 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 			copy_pte_range_sfork(dst_vma, src_vma, dst_pmd, src_pmd, addr, next))
 			return -ENOMEM;
 		else if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
-				   addr, next))
+				   addr, next)) {
+			printk("%s: normal copy pte range failed\n", __func__);
 			return -ENOMEM;
+		}
 	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
 	return 0;
 }
@@ -1778,6 +1809,128 @@ static inline bool should_zap_page(struct zap_details *details, struct page *pag
 	return !PageAnon(page);
 }
 
+static unsigned long zap_pte_range_sfork(struct mmu_gather *tlb,
+				struct vm_area_struct *vma, pmd_t *pmd,
+				unsigned long addr, unsigned long end,
+				struct zap_details *details)
+{
+	struct mm_struct *mm = tlb->mm;
+	int force_flush = 0;
+	int rss[NR_MM_COUNTERS];
+	spinlock_t *ptl;
+	pte_t *start_pte;
+	pte_t *pte;
+	swp_entry_t entry;
+
+	printk("%s: begin\n", __func__);
+
+	tlb_change_page_size(tlb, PAGE_SIZE);
+again:
+	init_rss_vec(rss);
+	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+	pte = start_pte;
+	flush_tlb_batched_pending(mm);
+	arch_enter_lazy_mmu_mode();
+	do {
+		pte_t ptent = *pte;
+		struct page *page;
+
+		if (pte_none(ptent))
+			continue;
+
+		if (need_resched())
+			break;
+
+		if (pte_present(ptent)) {
+			page = vm_normal_page(vma, addr, ptent);
+			if (unlikely(!should_zap_page(details, page)))
+				continue;
+			ptent = ptep_get_and_clear_full(mm, addr, pte,
+							tlb->fullmm);
+			tlb_remove_tlb_entry(tlb, pte, addr);
+			if (unlikely(!page))
+				continue;
+
+			if (!PageAnon(page)) {
+				if (pte_dirty(ptent)) {
+					force_flush = 1;
+					set_page_dirty(page);
+				}
+				if (pte_young(ptent) &&
+				    likely(!(vma->vm_flags & VM_SEQ_READ)))
+					mark_page_accessed(page);
+			}
+			rss[mm_counter(page)]--;
+			page_remove_rmap(page, vma, false);
+			if (unlikely(page_mapcount(page) < 0))
+				print_bad_pte(vma, addr, ptent, page);
+			if (unlikely(__tlb_remove_page(tlb, page))) {
+				force_flush = 1;
+				addr += PAGE_SIZE;
+				break;
+			}
+			continue;
+		}
+
+		entry = pte_to_swp_entry(ptent);
+		if (is_device_private_entry(entry) ||
+		    is_device_exclusive_entry(entry)) {
+			page = pfn_swap_entry_to_page(entry);
+			if (unlikely(!should_zap_page(details, page)))
+				continue;
+			rss[mm_counter(page)]--;
+			if (is_device_private_entry(entry))
+				page_remove_rmap(page, vma, false);
+			put_page(page);
+		} else if (!non_swap_entry(entry)) {
+			/* Genuine swap entry, hence a private anon page */
+			if (!should_zap_cows(details))
+				continue;
+			rss[MM_SWAPENTS]--;
+			if (unlikely(!free_swap_and_cache(entry)))
+				print_bad_pte(vma, addr, ptent, NULL);
+		} else if (is_migration_entry(entry)) {
+			page = pfn_swap_entry_to_page(entry);
+			if (!should_zap_page(details, page))
+				continue;
+			rss[mm_counter(page)]--;
+		} else if (is_hwpoison_entry(entry)) {
+			if (!should_zap_cows(details))
+				continue;
+		} else {
+			/* We should have covered all the swap entry types */
+			WARN_ON_ONCE(1);
+		}
+		pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
+	} while (pte++, addr += PAGE_SIZE, addr != end);
+
+	add_mm_rss_vec(mm, rss);
+	arch_leave_lazy_mmu_mode();
+
+	/* Do the actual TLB flush before dropping ptl */
+	if (force_flush)
+		tlb_flush_mmu_tlbonly(tlb);
+	pte_unmap_unlock(start_pte, ptl);
+
+	/*
+	 * If we forced a TLB flush (either due to running out of
+	 * batch buffers or because we needed to flush dirty TLB
+	 * entries before releasing the ptl), free the batched
+	 * memory too. Restart if we didn't do everything.
+	 */
+	if (force_flush) {
+		force_flush = 0;
+		tlb_flush_mmu(tlb);
+	}
+
+	if (addr != end) {
+		cond_resched();
+		goto again;
+	}
+
+	return addr;
+}
+
 static unsigned long zap_pte_range(struct mmu_gather *tlb,
 				struct vm_area_struct *vma, pmd_t *pmd,
 				unsigned long addr, unsigned long end,
@@ -1905,11 +2058,9 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 {
 	pmd_t *pmd;
 	unsigned long next;
-	bool test_break_cow = false;
 
 	pmd = pmd_offset(pud, addr);
 	do {
-		test_break_cow = false;
 		next = pmd_addr_end(addr, end);
 		if (is_swap_pmd(*pmd) || pmd_trans_huge(*pmd) || pmd_devmap(*pmd)) {
 			if (next - addr != HPAGE_PMD_SIZE)
@@ -1929,15 +2080,6 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 			spin_unlock(ptl);
 		}
 
-		// pmd may become none, so the next if-statement can skip it.
-		if (pte_page_is_cowing(pmd)) {
-			printk("%s: handle cow pte\n", __func__);
-			handle_cow_pte(vma, pmd, addr, true);
-			printk("%s: pmd none:%s (need to be true)\n",
-				__func__, pmd_none(*pmd) ? "true" : "false");
-			test_break_cow = true;
-		}
-
 		/*
 		 * Here there can be other concurrent MADV_DONTNEED or
 		 * trans huge page faults running, and if the pmd is
@@ -1946,11 +2088,18 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		 * mode.
 		 */
 		if (pmd_none_or_trans_huge_or_clear_bad(pmd)) {
-			if (test_break_cow)
-				printk("%s: skip the zap_pte_range()\n", __func__);
 			goto next;
 		}
 
+		// pmd may become none, so the next if-statement can skip it.
+		if (pte_page_is_cowing(pmd)) {
+			printk("%s: handle cow pte\n", __func__);
+			handle_cow_pte(vma, pmd, addr, false);
+			printk("%s: pmd none:%s (need to be true)\n",
+				__func__, pmd_none(*pmd) ? "true" : "false");
+			if (pmd_none(pmd))
+				goto next;
+		}
 		next = zap_pte_range(tlb, vma, pmd, addr, next, details);
 next:
 		cond_resched();
@@ -5062,11 +5211,11 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	pmd_t cowed_entry, entry = { 0 };
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long start, end;
-	int refcount, ret = 0;
+	int ret = 0;
 	//spinlock_t *ptl = NULL;
 
-	if (!(vma->vm_flags & VM_WRITE))
-		return 0;
+	//if (!(vma->vm_flags & VM_WRITE))
+	//	return 0;
 
 	if (!pmd) {
 		pgd = pgd_offset(mm, addr);
@@ -5079,12 +5228,14 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		if (pud_none_or_clear_bad(pud))
 			return 0;
 		pmd = pmd_offset(pud, addr);
-		if (pmd_none_or_clear_bad(pmd) || !pte_page_is_cowing(pmd))
+		if (pmd_none(*pmd) || !pte_page_is_cowing(pmd))
 			return 0;
 	}
 
 	BUG_ON(pmd_none(*pmd));
-	//BUG_ON(pte_page_is_cowing(pmd));
+	BUG_ON(!pte_page_is_cowing(pmd));
+
+	printk("%s: begin mm pgtables bytes %lu\n", __func__, mm_pgtables_bytes(mm));
 
 	/* cowed_entry <- pmd
 	 * then clear the original pmd entry
@@ -5096,29 +5247,34 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 
 	//ptl = pmd_lock(mm, &cowed_entry);
 
-	refcount = cow_pte_refcount_read(&cowed_entry);
 
 	// we want to zap
 	if (!alloc) {
 		printk("%s: zap the page\n", __func__);
-		// we are owner. do nothing with rss (do it later in zap function)
+		// we are owner. decrease rss and skip the zap.
+		// TODO: deal with tlb flush in zap.
 		// we just need to clear the ownership, and the pmd already do
 		// the clear up
 		// others need to increase the rss when they get ownership
 		if (cow_pte_is_same(&cowed_entry, vma)) {
 			printk("%s: do dec rss in zap\n", __func__);
 			set_cow_pte_owner(&cowed_entry, NULL);
+			cow_pte_rss(mm, vma, &cowed_entry, start, end, false /* dec */);
+			mm_dec_nr_ptes(mm);
 		}
 		// If we are not owner, do the rss doesn't change
 		// since we never increase it when we do the cow pte.
 
 		// deal with refcount
-		if (refcount > 1)
+		if (1 < cow_pte_refcount_read(&cowed_entry))
 			pmd_put_pte(&cowed_entry);
+
+		pmd_clear(pmd);
 		goto out;
 	}
 
-	// alloc set
+
+	// page fault, alloc set
 
 	// clear after the zap if_statement, so it want do it well in zap.
 	pmd_clear(pmd);
@@ -5137,12 +5293,13 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	 * else we are not the owner, we can just copy the pte and decreace
 	 * refcount.
 	 */
-	if (refcount == 1) {
+	if (1 == cow_pte_refcount_read(&cowed_entry)) {
 		// If we are owner, do nothing with rss
 		// But if we are not, we need to increase the rss.
 		if (!cow_pte_is_same(&cowed_entry, vma)) {
 			printk("%s: add rss\n", __func__);
 			cow_pte_rss(mm, vma, &cowed_entry, start, end, true /* inc */);
+			mm_inc_nr_ptes(mm);
 		}
 
 		/* we reuse the pte page */
@@ -5152,21 +5309,28 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		goto out;
 	}
 
-	// there are someone is sharing with us.
+	// someone is sharing with us.
+
 	if (cow_pte_is_same(&cowed_entry, vma)) {
-		// here we are owner, so we clear the ownership and copy it.
-		// rss doesn't not change here.
+		printk("%s: we are owner\n", __func__);
+		// here we are owner, so clear the ownership and copy it.
+		// to preserve rss correct we need decrease first.
+		// After this, copy_pte_range() will increase back (copy it).
+		//
 		// but other who get the ownership of this pte page
 		// and he want to reuse the page,
 		// he must need to increase the rss.
 		set_cow_pte_owner(&cowed_entry, NULL);
+		cow_pte_rss(mm, vma, &cowed_entry, start, end, false /* dec */);
+		mm_dec_nr_ptes(mm);
 	}
 	// else we are not owner, copy pte
 	// and it will increase rss in copy_pte_range.
 
 	printk("%s: alloc:%s refcount:%d RET_IP:%p mm:%p pmd:%lx\n",
 			__func__, alloc ? "true" : "false",
-			refcount, (void *)_RET_IP_, mm,
+			cow_pte_refcount_read(&cowed_entry),
+			(void *)_RET_IP_, mm,
 			(unsigned long) pmd);
 
 	// TODO: need to consider the write protection
@@ -5187,6 +5351,8 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 			__func__, cow_pte_refcount_read(&cowed_entry));
 out:
 	//spin_unlock(ptl);
+	printk("%s: end mm pgtables bytes %lu\n", __func__, mm_pgtables_bytes(mm));
+
 	return ret;
 }
 

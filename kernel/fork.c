@@ -1531,6 +1531,7 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 	return mm;
 
 free_pt:
+	printk("%s: free\n", __func__);
 	/* don't put binfmt in mmput, we haven't got module yet */
 	mm->binfmt = NULL;
 	mm_init_owner(mm, NULL);
@@ -2232,8 +2233,10 @@ static __latent_entropy struct task_struct *copy_process(
 	if (retval)
 		goto bad_fork_cleanup_sighand;
 	retval = copy_mm(clone_flags, p);
-	if (retval)
+	if (retval) {
+		printk("%s: copy_mm failed\n", __func__);
 		goto bad_fork_cleanup_signal;
+	}
 	retval = copy_namespaces(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_mm;

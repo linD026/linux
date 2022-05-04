@@ -677,7 +677,8 @@ static inline int cow_pte_refcount_read(pmd_t *pmd)
 
 static inline bool pte_page_is_cowing(pmd_t *pmd)
 {
-	return !pmd_write(*pmd) && cow_pte_refcount_read(pmd) > 1;
+	//return !pmd_write(*pmd) && cow_pte_refcount_read(pmd) > 1;
+	return !pmd_write(*pmd);
 }
 
 
