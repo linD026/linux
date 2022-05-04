@@ -1091,6 +1091,16 @@ copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_
 			__func__, addr,
 			(unsigned long) src_pmd, (unsigned long) dst_pmd);
 
+	for (i = 0; i < NR_MM_COUNTERS; i++) {
+		long dst_x = atomic_long_read(&dst_mm->rss_stat.count[i]);
+		long src_x = atomic_long_read(&src_mm->rss_stat.count[i]);
+		if (dst_x || src_x) {
+			printk("%s: before src rss-counter state mm:%p type:%s val:%ld\n",
+				 __func__, src_mm, resident_page_types[i], src_x);
+			printk("%s: before dst rss-counter state mm:%p type:%s val:%ld\n",
+				 __func__, dst_mm, resident_page_types[i], dst_x);
+		}
+	}
 again:
 	progress = 0;
 	init_rss_vec(rss);
@@ -1196,9 +1206,9 @@ again:
 		long dst_x = atomic_long_read(&dst_mm->rss_stat.count[i]);
 		long src_x = atomic_long_read(&src_mm->rss_stat.count[i]);
 		if (dst_x || src_x) {
-			printk("%s: src rss-counter state mm:%p type:%s val:%ld\n",
+			printk("%s: after src rss-counter state mm:%p type:%s val:%ld\n",
 				 __func__, src_mm, resident_page_types[i], src_x);
-			printk("%s: dst rss-counter state mm:%p type:%s val:%ld\n",
+			printk("%s: after dst rss-counter state mm:%p type:%s val:%ld\n",
 				 __func__, dst_mm, resident_page_types[i], dst_x);
 		}
 	}
@@ -1226,8 +1236,10 @@ again:
 	/* We've captured and resolved the error. Reset, try again. */
 	ret = 0;
 
-	if (addr != end)
+	if (addr != end) {
+		printk("%s: add != end try again\n", __func__);
 		goto again;
+	}
 out:
 	if (unlikely(prealloc))
 		put_page(prealloc);
@@ -2092,15 +2104,18 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		}
 
 		// pmd may become none, so the next if-statement can skip it.
-		if (pte_page_is_cowing(pmd)) {
+		if (pte_page_is_cowing(pmd) || !cow_pte_is_same(pmd, NULL) ||
+			1 < cow_pte_refcount_read(pmd)) {
 			printk("%s: handle cow pte\n", __func__);
 			handle_cow_pte(vma, pmd, addr, false);
 			printk("%s: pmd none:%s (need to be true)\n",
 				__func__, pmd_none(*pmd) ? "true" : "false");
-			if (pmd_none(pmd))
+			if (pmd_none(*pmd))
 				goto next;
+			next = zap_pte_range_sfork(tlb, vma, pmd, addr, next, details);
 		}
-		next = zap_pte_range(tlb, vma, pmd, addr, next, details);
+		else
+			next = zap_pte_range(tlb, vma, pmd, addr, next, details);
 next:
 		cond_resched();
 	} while (pmd++, addr = next, addr != end);
@@ -5306,6 +5321,7 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		set_cow_pte_owner(&cowed_entry, NULL);
 		entry = pmd_mkwrite(cowed_entry);
 		set_pmd_at(vma->vm_mm, addr, pmd, entry);
+		BUG_ON(pmd_write(*pmd));
 		goto out;
 	}
 
@@ -5335,6 +5351,8 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 
 	// TODO: need to consider the write protection
 
+	pmd_clear(pmd);
+
 	/* The situation here is pte page is not only belong to this process,
 	 * someone may also reference this pte page.
 	 * We need to copy the pte page (break cow).
@@ -5342,6 +5360,7 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	ret = copy_pte_range_sfork(vma, vma, pmd, &cowed_entry, start, end);
 	if (ret)
 		goto out;
+
 	printk("%s: new pte page refcount %d\n", __func__,
 			cow_pte_refcount_read(pmd));
 
