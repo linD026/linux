@@ -1074,7 +1074,7 @@ static const char * const resident_page_types[] = {
 static int
 copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	       pmd_t *dst_pmd, pmd_t *src_pmd, unsigned long addr,
-	       unsigned long end)
+	       unsigned long end, bool fault)
 {
 	struct mm_struct *dst_mm = dst_vma->vm_mm;
 	struct mm_struct *src_mm = src_vma->vm_mm;
@@ -1120,9 +1120,11 @@ again:
 	printk("%s: pte_alloc_map_lock\n", __func__);
 	src_pte = pte_offset_map(src_pmd, addr);
 	printk("%s: pte_lockptr\n", __func__);
-	src_ptl = pte_lockptr(src_mm, src_pmd);
+	if (!fault)
+		src_ptl = pte_lockptr(src_mm, src_pmd);
 	printk("%s: spin_lock_nested\n", __func__);
-	spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
+	if (!fault)
+		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 	orig_src_pte = src_pte;
 	orig_dst_pte = dst_pte;
 	arch_enter_lazy_mmu_mode();
@@ -1137,7 +1139,8 @@ again:
 		if (progress >= 32) {
 			progress = 0;
 			if (need_resched() ||
-			    spin_needbreak(src_ptl) || spin_needbreak(dst_ptl))
+			    ( !fault && spin_needbreak(src_ptl)) ||
+			    spin_needbreak(dst_ptl))
 				break;
 		}
 		if (pte_none(*src_pte)) {
@@ -1198,7 +1201,8 @@ again:
 				__func__, mm_pgtables_bytes(src_mm));
 
 	arch_leave_lazy_mmu_mode();
-	spin_unlock(src_ptl);
+	if (!fault)
+		spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
 
@@ -1493,7 +1497,7 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 				src_vma->vm_start, src_vma->vm_end);
 		}
 		else if (test_bit(MMF_COW_PGTABLE, &src_mm->flags) &&
-			copy_pte_range_sfork(dst_vma, src_vma, dst_pmd, src_pmd, addr, next))
+			copy_pte_range_sfork(dst_vma, src_vma, dst_pmd, src_pmd, addr, next, false))
 			return -ENOMEM;
 		else if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
 				   addr, next)) {
@@ -5227,7 +5231,7 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long start, end;
 	int ret = 0;
-	//spinlock_t *ptl = NULL;
+	spinlock_t *ptl = NULL;
 
 	//if (!(vma->vm_flags & VM_WRITE))
 	//	return 0;
@@ -5260,7 +5264,8 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	cowed_entry = *pmd;
 	// pmd_clear(pmd);
 
-	//ptl = pmd_lock(mm, &cowed_entry);
+	ptl = pte_lockptr(mm, &cowed_entry);
+	printk("%s: lock\n", __func__);
 
 
 	// we want to zap
@@ -5321,11 +5326,12 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		set_cow_pte_owner(&cowed_entry, NULL);
 		entry = pmd_mkwrite(cowed_entry);
 		set_pmd_at(vma->vm_mm, addr, pmd, entry);
-		BUG_ON(pmd_write(*pmd));
+		BUG_ON(!pmd_write(*pmd));
 		goto out;
 	}
 
 	// someone is sharing with us.
+	BUG_ON(cow_pte_refcount_read(&cowed_entry) <= 1);
 
 	if (cow_pte_is_same(&cowed_entry, vma)) {
 		printk("%s: we are owner\n", __func__);
@@ -5351,25 +5357,25 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 
 	// TODO: need to consider the write protection
 
-	pmd_clear(pmd);
-
 	/* The situation here is pte page is not only belong to this process,
 	 * someone may also reference this pte page.
 	 * We need to copy the pte page (break cow).
 	 */
-	ret = copy_pte_range_sfork(vma, vma, pmd, &cowed_entry, start, end);
+	ret = copy_pte_range_sfork(vma, vma, pmd, &cowed_entry, start, end, true);
 	if (ret)
 		goto out;
 
-	printk("%s: new pte page refcount %d\n", __func__,
-			cow_pte_refcount_read(pmd));
+	//printk("%s: new pte page refcount %d\n", __func__,
+	//		cow_pte_refcount_read(pmd));
+	BUG_ON(cow_pte_refcount_read(pmd) != 1);
 
 	pmd_put_pte(&cowed_entry);
 
 	printk("%s; after break cow pte refcount is %d\n",
 			__func__, cow_pte_refcount_read(&cowed_entry));
+
 out:
-	//spin_unlock(ptl);
+	spin_unlock(ptl);
 	printk("%s: end mm pgtables bytes %lu\n", __func__, mm_pgtables_bytes(mm));
 
 	return ret;
