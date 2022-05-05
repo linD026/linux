@@ -151,8 +151,8 @@ struct page {
 			union {
 				/* protected by page->ptl */
 				pgtable_t pmd_huge_pte;
-				/* cow pte */
-				struct vm_area_struct *cow_pte_owner;
+				/* cow pte: pmd */
+				pmd_t *cow_pte_owner;
 			};
 			unsigned long _pt_pad_2;	/* mapping */
 			union {

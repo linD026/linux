@@ -1085,12 +1085,13 @@ copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 	struct page *prealloc = NULL;
-	int i;
+	//int i;
 
 	printk("%s: address:%lx src_pmd:%lx, dst_pmd:%lx\n",
 			__func__, addr,
 			(unsigned long) src_pmd, (unsigned long) dst_pmd);
 
+	/*
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
 		long dst_x = atomic_long_read(&dst_mm->rss_stat.count[i]);
 		long src_x = atomic_long_read(&src_mm->rss_stat.count[i]);
@@ -1101,15 +1102,17 @@ copy_pte_range_sfork(struct vm_area_struct *dst_vma, struct vm_area_struct *src_
 				 __func__, dst_mm, resident_page_types[i], dst_x);
 		}
 	}
-again:
-	progress = 0;
-	init_rss_vec(rss);
+	*/
 
-	printk("%s: pmd same:%s dst_pmd is write:%s pmd none:%s\n",
+	printk("%s: pmd same:%s dst_pmd write:%s dst_pmd none:%s\n",
 			__func__,
 			pmd_same(*src_pmd, *dst_pmd) ? "true" : "false",
 			pmd_write(*dst_pmd) ? "true" : "false",
 	     		pmd_none(*dst_pmd) ? "true" : "false" );
+
+again:
+	progress = 0;
+	init_rss_vec(rss);
 
 	dst_pte = pte_alloc_map_lock(dst_mm, dst_pmd, addr, &dst_ptl);
 	if (!dst_pte) {
@@ -1117,19 +1120,19 @@ again:
 		printk("%s: alloc pte failed\n", __func__);
 		goto out;
 	}
-	printk("%s: pte_alloc_map_lock\n", __func__);
+	//printk("%s: pte_alloc_map_lock\n", __func__);
 	src_pte = pte_offset_map(src_pmd, addr);
-	printk("%s: pte_lockptr\n", __func__);
+	//printk("%s: pte_lockptr\n", __func__);
 	if (!fault)
 		src_ptl = pte_lockptr(src_mm, src_pmd);
-	printk("%s: spin_lock_nested\n", __func__);
+	//printk("%s: spin_lock_nested\n", __func__);
 	if (!fault)
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 	orig_src_pte = src_pte;
 	orig_dst_pte = dst_pte;
 	arch_enter_lazy_mmu_mode();
 
-	printk("%s: start loop\n", __func__);
+	//printk("%s: start loop\n", __func__);
 
 	do {
 		/*
@@ -1205,17 +1208,6 @@ again:
 		spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
-
-	for (i = 0; i < NR_MM_COUNTERS; i++) {
-		long dst_x = atomic_long_read(&dst_mm->rss_stat.count[i]);
-		long src_x = atomic_long_read(&src_mm->rss_stat.count[i]);
-		if (dst_x || src_x) {
-			printk("%s: after src rss-counter state mm:%p type:%s val:%ld\n",
-				 __func__, src_mm, resident_page_types[i], src_x);
-			printk("%s: after dst rss-counter state mm:%p type:%s val:%ld\n",
-				 __func__, dst_mm, resident_page_types[i], dst_x);
-		}
-	}
 
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
@@ -1379,51 +1371,6 @@ out:
 	return ret;
 }
 
-static inline bool cow_pte_in_same(pmd_t *pmd, struct vm_area_struct *vma)
-{
-	return (pmd_page(*pmd)->cow_pte_owner->vm_mm == vma->vm_mm);
-}
-
-/* accept child fork.
- * but don't accept same pte cowing in one process
- */
-static inline bool cow_pte_is_acceptable(pmd_t *pmd, struct vm_area_struct *vma)
-{
-	/* exclusive non-owner
-	 * Its always find when the pte page doesn't have owner
-	 * we accept it when the vma is owner, since it might be fork
-	 * again.
-	 */
-	if (!cow_pte_is_same(pmd, NULL) && !cow_pte_is_same(pmd, vma)) {
-		/* when vma is not the owner, we need to make sure this vma is
-		 * not in the same process.
-		 */
-		if (cow_pte_in_same(pmd, vma)) {
-			printk("%s: pmd_owner:%lx owner-mm:%lx, vma:%lx vma-mm:%lx\n",
-				__func__,
-				(unsigned long) pmd_page(*pmd)->cow_pte_owner,
-				(unsigned long) pmd_page(*pmd)->cow_pte_owner->vm_mm,
-				(unsigned long) vma, (unsigned long) vma->vm_mm);
-			printk("%s: owner-start %lx owner-end:%lx, vma-start:%lx vma-end:%lx\n",
-				__func__,
-				pmd_page(*pmd)->cow_pte_owner->vm_start,
-				pmd_page(*pmd)->cow_pte_owner->vm_end,
-				vma->vm_start,
-				vma->vm_end
-				);
-			return false;
-		}
-	}
-	return true;
-}
-
-static inline bool cow_pte_incompatible(struct vm_area_struct *vma)
-{
-	return (!vma_is_anonymous(vma)) ||
-		vma->vm_flags & VM_SHARED ||
-		(vma->vm_start <= vma->vm_mm->brk && vma->vm_end >= vma->vm_mm->start_brk) ;
-}
-
 static inline int
 copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	       pud_t *dst_pud, pud_t *src_pud, unsigned long addr,
@@ -1459,27 +1406,38 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		 * we can skip it.
 		 * Since, vma may overlap the previously pte that cowed already.
 		 */
-		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)
-		   && !cow_pte_incompatible(src_vma)) {
+		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)) {
 
-			/* when the address range of src_vma has ovelap previously cowed pte.
-			 * We need to skip the cow or copy, since it already copy it.
-			 * TODO: do this has any affect to the handle_cow_pte() (break cow)?
+			/* Skip if the pte page owner is src_pmd,
+			 * it already do the cow pte this time fork.
 			 */
-			if (!cow_pte_is_acceptable(src_pmd, src_vma))
+			if (!pmd_none(*dst_pmd) && cow_pte_is_same(dst_pmd, src_pmd)) {
+				printk("%s: skip, owner:%lx src_pmd refcount:%d dst_pmd refcount:%d\n",
+					__func__, (unsigned long)src_pmd,
+					cow_pte_refcount_read(src_pmd),
+					cow_pte_refcount_read(dst_pmd)
+					);
+				printk("%s: skip, owner:%lx dst_pmd write:%s src_pmd write:%s\n",
+					__func__, (unsigned long)src_pmd,
+					pmd_write(*dst_pmd) ? "yes" : "no",
+					pmd_write(*src_pmd) ? "yes" : "no"
+					);
 				continue;
+			}
 
 			if (src_vma->vm_flags & VM_WRITE) {
 				pmdp_set_wrprotect(src_mm, addr, src_pmd);
-				if (pmd_write(*src_pmd))
-					printk("%s: write protect unabled\n", __func__);
+				printk("%s: src_pmd write:%s\n",
+					__func__,
+					pmd_write(*src_pmd) ? "yes" : "no"
+					);
 			}
 
 			/* if there doesn't have owner the parent need to
 			 * take this pte.
 			 */
 			if (cow_pte_is_same(src_pmd, NULL)) {
-				set_cow_pte_owner(src_pmd, src_vma);
+				set_cow_pte_owner(src_pmd, src_pmd);
 				// parent already set 1 at allocation time
 				// pmd_get_pte(src_pmd);
 			}
@@ -1490,11 +1448,20 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 			/* cow on page table */
 			set_pmd_at(dst_mm, addr, dst_pmd, *src_pmd);
 
-			printk("%s: addr:%lx refcount:%d vma:%lx vm_start:%lx"
-				" vm_end:%lx\n", __func__, addr,
+			printk("%s:\n addr:%lx owner:%lx refcount:%d\n"
+				"dst_pmd write:%s src_pmd write:%s\n"
+				"vma:%lx vm_start:%lx vm_end:%lx\n"
+				"pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
+			       	__func__, addr,
+				(unsigned long)src_pmd,
 				cow_pte_refcount_read(src_pmd),
+				pmd_write(*dst_pmd) ? "yes" : "no",
+				pmd_write(*src_pmd) ? "yes" : "no",
 				(unsigned long)src_vma,
-				src_vma->vm_start, src_vma->vm_end);
+				src_vma->vm_start, src_vma->vm_end,
+				addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
+				(src_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
+				(src_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
 		}
 		else if (test_bit(MMF_COW_PGTABLE, &src_mm->flags) &&
 			copy_pte_range_sfork(dst_vma, src_vma, dst_pmd, src_pmd, addr, next, false))
@@ -1646,148 +1613,6 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 		raw_write_seqcount_end(&src_mm->write_protect_seq);
 		mmu_notifier_invalidate_range_end(&range);
 	}
-	return ret;
-}
-
-static inline int
-break_cow_pte_from_pmd(struct vm_area_struct *vma, pud_t *pud,
-		unsigned long addr, unsigned long end)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	pmd_t *src_pmd, dst_pmd;
-	unsigned long next;
-	int refcount;
-
-	src_pmd = pmd_offset(pud, addr);
-	dst_pmd = *src_pmd;
-	do {
-		next = pmd_addr_end(addr, end);
-		if (is_swap_pmd(*src_pmd) || pmd_trans_huge(*src_pmd)
-			|| pmd_devmap(*src_pmd))
-			continue;
-		if (pmd_none_or_clear_bad(src_pmd))
-			continue;
-
-		refcount = cow_pte_refcount_read(src_pmd);
-		if (refcount > 1) {
-			/* There are others still using it, we need make copy */
-			// TODO: How to handle allocate fault?
-			if (copy_pte_range(vma, vma, &dst_pmd, src_pmd,
-						addr, end))
-				return -ENOMEM;
-			pmd_put_pte(src_pmd);
-			if (cow_pte_is_same(src_pmd, vma))
-				set_cow_pte_owner(src_pmd, NULL);
-			set_pmd_at(mm, addr, src_pmd, pmd_mkwrite(dst_pmd));
-		}
-		else if (refcount == 1) {
-			set_cow_pte_owner(src_pmd, NULL);
-			dst_pmd = pmd_mkwrite(*src_pmd);
-			set_pmd_at(mm, addr, src_pmd, dst_pmd);
-			continue;
-		}
-	} while (src_pmd++, dst_pmd = *src_pmd, addr = next, addr != end);
-	return 0;
-}
-
-static inline int
-break_cow_pte_from_pud(struct vm_area_struct *vma, p4d_t *p4d,
-		unsigned long addr, unsigned long end)
-{
-	pud_t *pud;
-	unsigned long next;
-
-	pud = pud_offset(p4d, addr);
-	do {
-		next = pud_addr_end(addr, end);
-		if (pud_trans_huge(*pud) || pud_devmap(*pud))
-			continue;
-		if (pud_none_or_clear_bad(pud))
-			continue;
-		if (break_cow_pte_from_pmd(vma, pud, addr, next))
-			return -ENOMEM;
-	} while (pud++, addr = next, addr != end);
-	return 0;
-}
-
-static inline int
-break_cow_pte_from_p4d(struct vm_area_struct *vma, pgd_t *pgd,
-		unsigned long addr, unsigned long end)
-{
-	p4d_t *p4d;
-	unsigned long next;
-
-	p4d = p4d_offset(pgd, addr);
-	do {
-		next = p4d_addr_end(addr, end);
-		if (p4d_none_or_clear_bad(p4d))
-			continue;
-		if (break_cow_pte_from_pud(vma, p4d, addr, next))
-			return -ENOMEM;
-	} while (p4d++, addr = next, addr != end);
-	return 0;
-}
-
-static inline int
-break_cow_pte_from_pgd(struct vm_area_struct *vma, unsigned long start_address,
-		unsigned long end_address)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long next;
-	unsigned long addr = start_address;
-	unsigned long end = end_address;
-	pgd_t *pgd;
-	int ret = 0;
-
-	pgd = pgd_offset(mm, addr);
-	do {
-		next = pgd_addr_end(addr, end);
-		if (pgd_none_or_clear_bad(pgd))
-			continue;
-		if (unlikely(break_cow_pte_from_p4d(vma, pgd, addr, next))) {
-			ret = -ENOMEM;
-			break;
-		}
-	} while (pgd++, addr = next, addr != end);
-
-	return ret;
-}
-
-/* need hold the pgtable lock
- * This handle all the address of vma.
- * break_cow_pte() is different with handle_pmd_fault().
- * This function used at unmmap/mremap/free/split of vma, it will reset all the
- * share pte done for vma state.
- * another one only deal with the specific address of pmd entry.
- *
- * TODO: really need this one?
- * Use flags to determine the opeation after the abort share pte, so this
- * function can do the fast path to them.
- * - Free pgtable: usually decrease the refcount
- *
- * While some write in the cow pet at same time?
- */
-int break_cow_pte_range(struct vm_area_struct *vma, unsigned long start_address,
-		unsigned long end_address)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	int ret = 0;
-	unsigned long start = max(vma->vm_start, start_address);
-	unsigned long end;
-
-	mmap_assert_write_locked(mm);
-
-	if (start >= vma->vm_end)
-		return ret;
-	end = min(vma->vm_end, end_address);
-	if (end <= vma->vm_start)
-		return ret;
-
-	if (unlikely(is_vm_hugetlb_page(vma)))
-		return ret;
-
-	ret = break_cow_pte_from_pgd(vma, start, end);
-
 	return ret;
 }
 
@@ -2108,8 +1933,7 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		}
 
 		// pmd may become none, so the next if-statement can skip it.
-		if (pte_page_is_cowing(pmd) || !cow_pte_is_same(pmd, NULL) ||
-			1 < cow_pte_refcount_read(pmd)) {
+		if (pte_page_is_cowing(pmd)) {
 			printk("%s: handle cow pte\n", __func__);
 			handle_cow_pte(vma, pmd, addr, false);
 			printk("%s: pmd none:%s (need to be true)\n",
@@ -5192,7 +5016,7 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
 	orig_ptep = ptep;
 	arch_enter_lazy_mmu_mode();
 	do {
-		if (pte_none(*ptep)) {
+		if (pte_none(*ptep) || pte_special(*ptep)) {
 			continue;
 		}
 
@@ -5200,13 +5024,107 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
 		if (page) {
 			if (inc_dec)
 				rss[mm_counter(page)]++;
-			else
+			else {
 				rss[mm_counter(page)]--;
+			}
 		}
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
 	arch_leave_lazy_mmu_mode();
 	add_mm_rss_vec(dst_mm, rss);
 	pte_unmap_unlock(orig_ptep, ptl);
+}
+
+void cow_pte_fallback(pmd_t *src_pmd,
+		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
+		unsigned long addr)
+{
+	struct mm_struct *dst_mm = dst_vma->vm_mm;
+	unsigned long start, end;
+	pmd_t new;
+
+	BUG_ON(pmd_write(*src_pmd));
+	BUG_ON(cow_pte_refcount_read(src_pmd) != 1);
+
+	start = addr & PMD_MASK;
+	end = (addr + PMD_SIZE) & PMD_MASK;
+
+	// if we are not owner, we need to increase the rss.
+	if (!cow_pte_is_same(src_pmd, dst_pmd)) {
+		cow_pte_rss(dst_mm, dst_vma, src_pmd, start, end, true /* inc */);
+		mm_inc_nr_ptes(dst_mm);
+	}
+
+	/* we reuse the pte page */
+	set_cow_pte_owner(src_pmd, NULL);
+	new = pmd_mkwrite(*src_pmd);
+	set_pmd_at(dst_mm, addr, dst_pmd, new);
+
+	BUG_ON(!pmd_write(*dst_pmd));
+}
+
+int break_cow_pte(pmd_t *src_pmd,
+		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
+		unsigned long addr)
+{
+	struct mm_struct *dst_mm = dst_vma->vm_mm;
+	unsigned long start, end;
+	pmd_t cowed_entry = *src_pmd;
+	unsigned long debug_pagetable_bytes;
+
+	BUG_ON(pmd_write(cowed_entry));
+	BUG_ON(cow_pte_refcount_read(&cowed_entry) != cow_pte_refcount_read(dst_pmd));
+	BUG_ON(cow_pte_refcount_read(&cowed_entry) <= 1);
+
+	start = addr & PMD_MASK;
+	end = (addr + PMD_SIZE) & PMD_MASK;
+
+	// DEBUG BEGIN
+	debug_pagetable_bytes = mm_pgtables_bytes(dst_mm);
+	// DBUG END
+
+	/* The situation here is pte page is not only belong to this process,
+	 * someone may also reference this pte page.
+	 * We need to copy the pte page (break cow).
+	 *
+	 * TODO: src_pmd clear?
+	 */
+	pmd_clear(dst_pmd);
+	if(copy_pte_range_sfork(dst_vma, dst_vma, dst_pmd, &cowed_entry, start, end, true))
+		return -ENOMEM;
+
+	BUG_ON(!pmd_write(*dst_pmd));
+	BUG_ON(pmd_write(cowed_entry));
+	BUG_ON(cow_pte_refcount_read(dst_pmd) != 1);
+
+	if (cow_pte_is_same(&cowed_entry, dst_pmd)) {
+		// here we are owner, so clear the ownership.
+		// to preserve rss correct we need to decrease.
+		//
+		// but other who get the ownership of this pte page
+		// and he want to reuse the page,
+		// he must need to increase the rss.
+		set_cow_pte_owner(&cowed_entry, NULL);
+		cow_pte_rss(dst_mm, dst_vma, dst_pmd, start, end, false /* dec */);
+		mm_dec_nr_ptes(dst_mm);
+	}
+
+	// DEBUG BEGIN
+	BUG_ON(mm_pgtables_bytes(dst_mm) - debug_pagetable_bytes != PAGE_SIZE);
+	// DEBUG END
+
+	pmd_put_pte(dst_vma, &cowed_entry, addr);
+	return 0;
+}
+
+// TODO tlb flush
+int zap_cow_pte(pmd_t *src_pmd,
+		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
+		unsigned long addr)
+{
+	// return 0 if fallback
+	if (pmd_put_pte(dst_vma, src_pmd, addr))
+		return 1;
+	return 0;
 }
 
 /* If alloc set, it means after this function it will not do any to the page.
@@ -5227,10 +5145,8 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pud_t *pud;
-	pmd_t cowed_entry, entry = { 0 };
 	struct mm_struct *mm = vma->vm_mm;
-	unsigned long start, end;
-	int ret = 0;
+	int i, ret = 0;
 	spinlock_t *ptl = NULL;
 
 	//if (!(vma->vm_flags & VM_WRITE))
@@ -5249,132 +5165,40 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		pmd = pmd_offset(pud, addr);
 		if (pmd_none(*pmd) || !pte_page_is_cowing(pmd))
 			return 0;
+		printk("split vma: handle cow pte\n");
 	}
+
+	printk("%s: pmd refcount=%d write=%s\n",
+			__func__, cow_pte_refcount_read(pmd),
+			pmd_write(*pmd) ? "yes" : "no");
 
 	BUG_ON(pmd_none(*pmd));
 	BUG_ON(!pte_page_is_cowing(pmd));
 
 	printk("%s: begin mm pgtables bytes %lu\n", __func__, mm_pgtables_bytes(mm));
 
-	/* cowed_entry <- pmd
-	 * then clear the original pmd entry
-	 * so after this function, when it doing the free or zap, it will
-	 * ignore this entry.
-	 */
-	cowed_entry = *pmd;
-	// pmd_clear(pmd);
+	ptl = pte_lockptr(mm, pmd);
 
-	ptl = pte_lockptr(mm, &cowed_entry);
-	printk("%s: lock\n", __func__);
-
-
-	// we want to zap
 	if (!alloc) {
 		printk("%s: zap the page\n", __func__);
-		// we are owner. decrease rss and skip the zap.
-		// TODO: deal with tlb flush in zap.
-		// we just need to clear the ownership, and the pmd already do
-		// the clear up
-		// others need to increase the rss when they get ownership
-		if (cow_pte_is_same(&cowed_entry, vma)) {
-			printk("%s: do dec rss in zap\n", __func__);
-			set_cow_pte_owner(&cowed_entry, NULL);
-			cow_pte_rss(mm, vma, &cowed_entry, start, end, false /* dec */);
-			mm_dec_nr_ptes(mm);
+		ret = zap_cow_pte(pmd, vma, pmd, addr);
+		printk("%s: zap=%s\n", __func__, ret ? "fallback" : "only dec count");
+	}
+	else {
+		printk("%s: break cow\n", __func__);
+		ret = break_cow_pte(pmd, vma, pmd, addr);
+		printk("%s: break cow=%s\n", __func__, ret ? "ENOMEM" : "sucess");
+	}
+
+	for (i = 0; i < NR_MM_COUNTERS; i++) {
+		long x = atomic_long_read(&mm->rss_stat.count[i]);
+		if (x) {
+			printk("%s: rss-counter state mm:%p type:%s val:%ld\n",
+				 __func__, mm, resident_page_types[i], x);
 		}
-		// If we are not owner, do the rss doesn't change
-		// since we never increase it when we do the cow pte.
-
-		// deal with refcount
-		if (1 < cow_pte_refcount_read(&cowed_entry))
-			pmd_put_pte(&cowed_entry);
-
-		pmd_clear(pmd);
-		goto out;
 	}
 
 
-	// page fault, alloc set
-
-	// clear after the zap if_statement, so it want do it well in zap.
-	pmd_clear(pmd);
-
-	start = addr & PMD_MASK;
-	end = (addr + PMD_SIZE) & PMD_MASK;
-
-	/* If page->pte_refcount is 1, then we reset the pmd entry and pte page
-	 * , by cleaning up pte page->cow_pte_owner and making pmd entry
-	 * writable.
-	 *
-	 * else if vma and pmd are belong to same process and refcount is > 1,
-	 * which means vma and pmd are reference to same pte but some one also
-	 * reference this pte, we need to drop off the ownership.
-	 *
-	 * else we are not the owner, we can just copy the pte and decreace
-	 * refcount.
-	 */
-	if (1 == cow_pte_refcount_read(&cowed_entry)) {
-		// If we are owner, do nothing with rss
-		// But if we are not, we need to increase the rss.
-		if (!cow_pte_is_same(&cowed_entry, vma)) {
-			printk("%s: add rss\n", __func__);
-			cow_pte_rss(mm, vma, &cowed_entry, start, end, true /* inc */);
-			mm_inc_nr_ptes(mm);
-		}
-
-		/* we reuse the pte page */
-		set_cow_pte_owner(&cowed_entry, NULL);
-		entry = pmd_mkwrite(cowed_entry);
-		set_pmd_at(vma->vm_mm, addr, pmd, entry);
-		BUG_ON(!pmd_write(*pmd));
-		goto out;
-	}
-
-	// someone is sharing with us.
-	BUG_ON(cow_pte_refcount_read(&cowed_entry) <= 1);
-
-	if (cow_pte_is_same(&cowed_entry, vma)) {
-		printk("%s: we are owner\n", __func__);
-		// here we are owner, so clear the ownership and copy it.
-		// to preserve rss correct we need decrease first.
-		// After this, copy_pte_range() will increase back (copy it).
-		//
-		// but other who get the ownership of this pte page
-		// and he want to reuse the page,
-		// he must need to increase the rss.
-		set_cow_pte_owner(&cowed_entry, NULL);
-		cow_pte_rss(mm, vma, &cowed_entry, start, end, false /* dec */);
-		mm_dec_nr_ptes(mm);
-	}
-	// else we are not owner, copy pte
-	// and it will increase rss in copy_pte_range.
-
-	printk("%s: alloc:%s refcount:%d RET_IP:%p mm:%p pmd:%lx\n",
-			__func__, alloc ? "true" : "false",
-			cow_pte_refcount_read(&cowed_entry),
-			(void *)_RET_IP_, mm,
-			(unsigned long) pmd);
-
-	// TODO: need to consider the write protection
-
-	/* The situation here is pte page is not only belong to this process,
-	 * someone may also reference this pte page.
-	 * We need to copy the pte page (break cow).
-	 */
-	ret = copy_pte_range_sfork(vma, vma, pmd, &cowed_entry, start, end, true);
-	if (ret)
-		goto out;
-
-	//printk("%s: new pte page refcount %d\n", __func__,
-	//		cow_pte_refcount_read(pmd));
-	BUG_ON(cow_pte_refcount_read(pmd) != 1);
-
-	pmd_put_pte(&cowed_entry);
-
-	printk("%s; after break cow pte refcount is %d\n",
-			__func__, cow_pte_refcount_read(&cowed_entry));
-
-out:
 	spin_unlock(ptl);
 	printk("%s: end mm pgtables bytes %lu\n", __func__, mm_pgtables_bytes(mm));
 
@@ -5592,13 +5416,16 @@ retry_pud:
 		 * then set this entry writeable and decrease the refcount at pte.
 		 */
 		//if (vmf.flags & FAULT_FLAG_WRITE &&
-		if (!pmd_none(*vmf.pmd) && vma->vm_flags & VM_WRITE && pte_page_is_cowing(&vmf.orig_pmd)) {
+		if (!pmd_none(*vmf.pmd) &&
+		    vma->vm_flags & VM_WRITE &&
+		    pte_page_is_cowing(&vmf.orig_pmd)) {
 			// copy_pte_range will lock the pmd_lock
+			printk("%s: begin handle cow pte\n", __func__);
 			if (handle_cow_pte(vmf.vma, vmf.pmd, vmf.address, true)) {
 				printk("%s: vm fault oom\n", __func__);
 				return VM_FAULT_OOM;
 			}
-			printk("%s: pmd none:%s pmd bad:%s\n", __func__,
+			printk("%s: end pmd none:%s pmd bad:%s\n", __func__,
 				pmd_none(*vmf.pmd) ? "true" : "false",
 				pmd_bad(*vmf.pmd) ? "true" : "false");
 			// broke the cow pte

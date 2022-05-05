@@ -595,9 +595,28 @@ static inline int pmd_get_pte(pmd_t *pmd)
 	return atomic_inc_return(&pmd_page(*pmd)->cow_pte_refcount);
 }
 
-static inline int pmd_put_pte(pmd_t *pmd)
+extern void cow_pte_fallback(pmd_t *src_pmd,
+		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
+		unsigned long addr);
+
+static inline int pmd_put_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
 {
-	return atomic_dec_return(&pmd_page(*pmd)->cow_pte_refcount);
+	/* If page->pte_refcount is 1, then we reset the pmd entry and pte page
+	 * , by cleaning up pte page->cow_pte_owner and making pmd entry
+	 * writable.
+	 *
+	 * else if vma and pmd are belong to same process and refcount is > 1,
+	 * which means vma and pmd are reference to same pte but some one also
+	 * reference this pte, we need to drop off the ownership.
+	 *
+	 * else we are not the owner, we can just copy the pte and decreace
+	 * refcount.
+	 */
+	if (atomic_dec_return(&pmd_page(*pmd)->cow_pte_refcount) == 1) {
+		cow_pte_fallback(pmd, vma, pmd, addr);
+		return 1;
+	}
+	return 0;
 }
 
 extern int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,

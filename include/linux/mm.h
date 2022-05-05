@@ -686,23 +686,20 @@ static inline bool pte_page_is_cowing(pmd_t *pmd)
  * store the vma that pte page belong for by determining pte page->cow_pte_owner
  * is already set the vma or not.
  */
-static inline bool set_cow_pte_owner(pmd_t *pmd, struct vm_area_struct *vma)
+static inline bool set_cow_pte_owner(pmd_t *pmd, pmd_t *owner)
 {
-	struct page *page;
-	page = pmd_page(*pmd);
-	if (!vma) {
-		page->cow_pte_owner = NULL;
+	struct page *page = pmd_page(*pmd);
+	pmd_t *old = READ_ONCE(page->cow_pte_owner);
+	WRITE_ONCE(page->cow_pte_owner, owner);
+	smp_mb();
+	if (old == NULL)
 		return true;
-	}
-	if (page->cow_pte_owner)
-		return false;
-	page->cow_pte_owner = vma;
-	return true;
+	return false;
 }
 
-static inline bool cow_pte_is_same(pmd_t *pmd, struct vm_area_struct *vma)
+static inline bool cow_pte_is_same(pmd_t *pmd, pmd_t *owner)
 {
-        return (pmd_page(*pmd)->cow_pte_owner == vma) ? true : false;
+	return (smp_load_acquire(&pmd_page(*pmd)->cow_pte_owner) == owner) ? true : false;
 }
 
 int break_cow_pte_range(struct vm_area_struct *vma, unsigned long start_address,
@@ -2365,8 +2362,8 @@ static inline bool pgtable_pte_page_ctor(struct page *page)
 	if (!ptlock_init(page))
 		return false;
 	__SetPageTable(page);
-	page->cow_pte_owner = NULL;
 	inc_lruvec_page_state(page, NR_PAGETABLE);
+	page->cow_pte_owner = NULL;
 	atomic_set(&page->cow_pte_refcount, 1);
 	return true;
 }
