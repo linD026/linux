@@ -611,8 +611,9 @@ static inline int pmd_put_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned l
 	 *
 	 * else we are not the owner, we can just copy the pte and decreace
 	 * refcount.
+	 *
 	 */
-	if (atomic_dec_return(&pmd_page(*pmd)->cow_pte_refcount) == 1) {
+	if (!atomic_add_unless(&pmd_page(*pmd)->cow_pte_refcount, -1, 1)) {
 		cow_pte_fallback(pmd, vma, pmd, addr);
 		return 1;
 	}

@@ -2643,8 +2643,20 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	add_latent_entropy();
 
 	/* Disable the flag of parent cow on page table  */
-	if (current->mm)
+	if (current->mm) {
+		if (test_bit(MMF_COW_PGTABLE, &current->mm->flags)) {
+			int i;
+			for (i = 0; i < NR_MM_COUNTERS; i++) {
+				long x = atomic_long_read(&p->mm->rss_stat.count[i]);
+				if (x) {
+					printk("%s: child rss-counter state mm:%p type:%s val:%ld\n",
+						 __func__, p->mm, resident_page_types[i], x);
+				}
+			}
+		}
+		smp_mb();
 		clear_bit(MMF_COW_PGTABLE, &current->mm->flags);
+	}
 
 	if (IS_ERR(p))
 		return PTR_ERR(p);
@@ -2666,6 +2678,7 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 		init_completion(&vfork);
 		get_task_struct(p);
 	}
+
 
 	/* Disable the flag of child cow on page table */
 	if (p->mm)
@@ -2738,11 +2751,19 @@ SYSCALL_DEFINE0(sfork)
 		.exit_signal = SIGCHLD,
 	};
 	pid_t pid;
+	int i;
 
 	set_bit(MMF_COW_PGTABLE, &current->mm->flags);
 
 	printk("%s: start\n", __func__);
 	pid = kernel_clone(&args);
+	for (i = 0; i < NR_MM_COUNTERS; i++) {
+		long x = atomic_long_read(&current->mm->rss_stat.count[i]);
+		if (x) {
+			printk("%s: parent rss-counter state mm:%p type:%s val:%ld\n",
+				 __func__, current->mm, resident_page_types[i], x);
+		}
+	}
 	printk("%s: end\n", __func__);
 
 	return pid;
