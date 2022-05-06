@@ -1194,14 +1194,16 @@ again:
 		progress += 8;
 	} while (dst_pte++, src_pte++, addr += PAGE_SIZE, addr != end);
 
-	 printk("%s: end loop \n", __func__);
+	//printk("%s: end loop \n", __func__);
 
+	/*
 	if (mm_pgtables_bytes(dst_mm))
 		printk("%s: non-zero pgtables_bytes dst_mm: %ld\n",
 				__func__, mm_pgtables_bytes(dst_mm));
 	if (mm_pgtables_bytes(src_mm))
 		printk("%s: non-zero pgtables_bytes src_mm: %ld\n",
 				__func__, mm_pgtables_bytes(src_mm));
+	*/
 
 	arch_leave_lazy_mmu_mode();
 	if (!fault)
@@ -1233,7 +1235,7 @@ again:
 	ret = 0;
 
 	if (addr != end) {
-		printk("%s: add != end try again\n", __func__);
+		//printk("%s: add != end try again\n", __func__);
 		goto again;
 	}
 out:
@@ -1413,11 +1415,13 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		 * Since, vma may overlap the previously pte that cowed already.
 		 */
 		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)
-			&& !is_vma_odf_incompatible(src_vma)
+		//	&& !is_vma_odf_incompatible(src_vma)
 			) {
 
 			/* Skip if the pte page owner is src_pmd,
 			 * it already do the cow pte this time fork.
+			 *
+			 * TODO: dst_pmd may no init to zero?
 			 */
 			if (!pmd_none(*dst_pmd) && cow_pte_is_same(dst_pmd, src_pmd)) {
 				printk("%s:\n"
@@ -1671,14 +1675,15 @@ static unsigned long zap_pte_range_sfork(struct mmu_gather *tlb,
 
         printk("%s:\n"
                 "    addr:%lx owner:%lx\n"
-                "    pmd:%lx mm bytes:%lu\n"
+                "    pmd:%lx mm:%lx mm bytes:%lu\n"
                 "    refcount:%d\n"
                 "    pmd write:%s\n"
                 "    vma:%lx vm_start:%lx vm_end:%lx\n"
                 "    pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
                 __func__, addr,
-                (unsigned long)pmd_page(*pmd)->cow_pte_owner,
+                (unsigned long) pmd_page(*pmd)->cow_pte_owner,
                 (unsigned long) pmd,
+		(unsigned long) mm,
                 mm_pgtables_bytes(mm),
                 cow_pte_refcount_read(pmd),
                 pmd_write(*pmd) ? "yes" : "no",
@@ -5041,11 +5046,10 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
 {
 	int rss[NR_MM_COUNTERS];
 	pte_t *orig_ptep, *ptep;
-	spinlock_t *ptl;
 	struct page *page;
 	init_rss_vec(rss);
 
-	ptep = pte_offset_map_lock(dst_mm, src_pmdp, addr, &ptl);
+	ptep = pte_offset_map(src_pmdp, addr);
 	orig_ptep = ptep;
 	arch_enter_lazy_mmu_mode();
 	do {
@@ -5064,9 +5068,16 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
 	arch_leave_lazy_mmu_mode();
 	add_mm_rss_vec(dst_mm, rss);
-	pte_unmap_unlock(orig_ptep, ptl);
+	pte_unmap(orig_ptep);
 }
 
+/* Fallback for page fault:
+ * - two state here
+ *   - After break child :   [parent, rss=1, ref=1, write=NO , owner=parent]
+ *                        to [parent, rss=1, ref=1, write=YES, owner=NULL  ]
+ *   - After break parent:   [child , rss=0, ref=1, write=NO , owner=NULL  ]
+ *                        to [child , rss=1, ref=1, write=YES, owner=NULL  ]
+ */
 void cow_pte_fallback(pmd_t *src_pmd,
 		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
 		unsigned long addr)
@@ -5075,37 +5086,14 @@ void cow_pte_fallback(pmd_t *src_pmd,
 	unsigned long start, end;
 	pmd_t new;
 
-	BUG_ON(pmd_write(*src_pmd));
-	BUG_ON(cow_pte_refcount_read(src_pmd) != 1);
+	BUG_ON(pmd_write(*dst_pmd));
+	BUG_ON(cow_pte_refcount_read(dst_pmd) != 1);
 
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
-	printk("%s:\n"
-		"    addr:%lx src owner:%lx dst owner:%lx\n"
-		"    dst:%lx src:%lx mm bytes:%lu\n"
-		"    dst refcount:%d src refcount:%d\n"
-		"    dst_pmd write:%s src_pmd write:%s\n"
-		"    vma:%lx vm_start:%lx vm_end:%lx\n"
-		"    pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
-	       	__func__, addr,
-		(unsigned long)pmd_page(*src_pmd)->cow_pte_owner,
-		(unsigned long)pmd_page(*dst_pmd)->cow_pte_owner,
-		(unsigned long) dst_pmd,
-		(unsigned long) src_pmd,
-		mm_pgtables_bytes(dst_mm),
-		cow_pte_refcount_read(dst_pmd),
-		cow_pte_refcount_read(src_pmd),
-		pmd_write(*dst_pmd) ? "yes" : "no",
-		pmd_write(*src_pmd) ? "yes" : "no",
-		(unsigned long)dst_vma,
-		dst_vma->vm_start, dst_vma->vm_end,
-		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
-		(dst_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
-		(dst_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
-
 	// if we are not owner, we need to increase the rss.
-	if (!cow_pte_is_same(src_pmd, dst_pmd)) {
+	if (cow_pte_is_same(dst_pmd, NULL)) {
 		cow_pte_rss(dst_mm, dst_vma, src_pmd, start, end, true /* inc */);
 		mm_inc_nr_ptes(dst_mm);
 	}
@@ -5115,31 +5103,22 @@ void cow_pte_fallback(pmd_t *src_pmd,
 	new = pmd_mkwrite(*src_pmd);
 	set_pmd_at(dst_mm, addr, dst_pmd, new);
 
-	printk(	"      addr:%lx src owner:%lx dst owner:%lx\n"
-		"      dst:%lx src:%lx mm bytes:%lu\n"
-		"      dst refcount:%d src refcount:%d\n"
-		"      dst_pmd write:%s src_pmd write:%s\n"
-		"      vma:%lx vm_start:%lx vm_end:%lx\n"
-		"      pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
-	       	addr,
-		(unsigned long)pmd_page(*src_pmd)->cow_pte_owner,
-		(unsigned long)pmd_page(*dst_pmd)->cow_pte_owner,
-		(unsigned long) dst_pmd,
-		(unsigned long) src_pmd,
-		mm_pgtables_bytes(dst_mm),
-		cow_pte_refcount_read(dst_pmd),
-		cow_pte_refcount_read(src_pmd),
-		pmd_write(*dst_pmd) ? "yes" : "no",
-		pmd_write(*src_pmd) ? "yes" : "no",
-		(unsigned long)dst_vma,
-		dst_vma->vm_start, dst_vma->vm_end,
-		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
-		(dst_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
-		(dst_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
-
 	BUG_ON(!pmd_write(*dst_pmd));
+	BUG_ON(pmd_page(*dst_pmd)->cow_pte_owner);
 }
 
+/* Break cow pte for page fault:
+ * - two state here
+ *   - After sfork:   [parent, rss=1, ref=2, write=NO , owner=parent]
+ *                 to [parent, rss=1, ref=1, write=YES, owner=NULL  ]
+ *                    [child , rss=0, ref=2, write=NO , owner=parent]
+ *                 to [child , rss=1, ref=1, write=YES, owner=parent]
+ *   NOTE
+ *     - copy the cow pte to new pte.
+ *     - clear the owner of cow pte and set our pmd entry writable when we are owner
+ *     - inc rss if we are not owner
+ *
+ */
 int break_cow_pte(pmd_t *src_pmd,
 		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
 		unsigned long addr)
@@ -5149,9 +5128,15 @@ int break_cow_pte(pmd_t *src_pmd,
 	pmd_t cowed_entry = *src_pmd;
 	unsigned long debug_pagetable_bytes;
 
-	//BUG_ON(pmd_write(cowed_entry));
-	BUG_ON(cow_pte_refcount_read(&cowed_entry) != cow_pte_refcount_read(dst_pmd));
-	BUG_ON(cow_pte_refcount_read(&cowed_entry) <= 1);
+
+	if (cow_pte_refcount_read(&cowed_entry) == 1) {
+		cow_pte_fallback(src_pmd, dst_vma, dst_pmd, addr);
+		return 0;
+	}
+
+	// page fault only
+	BUG_ON(pmd_write(cowed_entry));
+	BUG_ON(!pmd_page(cowed_entry)->cow_pte_owner);
 
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
@@ -5160,46 +5145,9 @@ int break_cow_pte(pmd_t *src_pmd,
 	debug_pagetable_bytes = mm_pgtables_bytes(dst_mm);
 	// DBUG END
 
-	/* The situation here is pte page is not only belong to this process,
-	 * someone may also reference this pte page.
-	 * We need to copy the pte page (break cow).
-	 *
-	 * TODO: src_pmd clear?
-	 */
 	pmd_clear(dst_pmd);
 	if(copy_pte_range_sfork(dst_vma, dst_vma, dst_pmd, &cowed_entry, start, end, true))
 		return -ENOMEM;
-
-	BUG_ON(!pmd_write(*dst_pmd));
-	BUG_ON(pmd_write(cowed_entry));
-	BUG_ON(cow_pte_refcount_read(dst_pmd) != 1);
-
-	printk("%s:\n"
-		"    addr:%lx cowed owner:%lx src owner:%lx dst owner:%lx\n"
-		"    dst:%lx src:%lx mm bytes:%lu\n"
-		"    dst refcount:%d src refcount:%d\n"
-		"    dst_pmd write:%s src_pmd write:%s\n"
-		"    vma:%lx vm_start:%lx vm_end:%lx\n"
-		"    pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
-	       	__func__, addr,
-		(unsigned long)pmd_page(cowed_entry)->cow_pte_owner,
-		(unsigned long)pmd_page(*src_pmd)->cow_pte_owner,
-		(unsigned long)pmd_page(*dst_pmd)->cow_pte_owner,
-		(unsigned long) dst_pmd,
-		(unsigned long) src_pmd,
-		mm_pgtables_bytes(dst_mm),
-		cow_pte_refcount_read(dst_pmd),
-		cow_pte_refcount_read(&cowed_entry),
-		pmd_write(*dst_pmd) ? "yes" : "no",
-		(pmd_page(cowed_entry)->cow_pte_owner) ?
-			pmd_write(*pmd_page(cowed_entry)->cow_pte_owner) ? "yes" : "no"   //xxx cowed_entry may not have owner
-			: "NULL",
-		(unsigned long)dst_vma,
-		dst_vma->vm_start, dst_vma->vm_end,
-		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
-		(dst_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
-		(dst_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
-
 
 	// DEBUG BEGIN
 	BUG_ON(mm_pgtables_bytes(dst_mm) - debug_pagetable_bytes != PAGE_SIZE);
@@ -5219,33 +5167,8 @@ int break_cow_pte(pmd_t *src_pmd,
 
 	pmd_put_pte(dst_vma, &cowed_entry, addr);
 
-		printk( "      addr:%lx cowed owner:%lx src owner:%lx dst owner:%lx\n"
-		"      dst:%lx src:%lx mm bytes:%lu\n"
-		"      dst refcount:%d src refcount:%d\n"
-		"      dst_pmd write:%s src_pmd write:%s\n"
-		"      vma:%lx vm_start:%lx vm_end:%lx\n"
-		"      pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
-	       	addr,
-		(unsigned long)pmd_page(cowed_entry)->cow_pte_owner,
-		(unsigned long)pmd_page(*src_pmd)->cow_pte_owner,
-		(unsigned long)pmd_page(*dst_pmd)->cow_pte_owner,
-		(unsigned long) dst_pmd,
-		(unsigned long) src_pmd,
-		mm_pgtables_bytes(dst_mm),
-		cow_pte_refcount_read(dst_pmd),
-		cow_pte_refcount_read(&cowed_entry),
-		pmd_write(*dst_pmd) ? "yes" : "no",
-		(pmd_page(cowed_entry)->cow_pte_owner) ?
-			pmd_write(*pmd_page(cowed_entry)->cow_pte_owner) ? "yes" : "no"   //xxx cowed_entry may not have owner
-			: "NULL",
-		(unsigned long)dst_vma,
-		dst_vma->vm_start, dst_vma->vm_end,
-		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
-		(dst_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
-		(dst_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
-	if (pmd_page(cowed_entry)->cow_pte_owner)
-		printk("        cowed pmd owner write:%s\n",
-				pmd_write(*pmd_page(cowed_entry)->cow_pte_owner) ? "yes" : "no");
+	BUG_ON(!pmd_write(*dst_pmd));
+	BUG_ON(cow_pte_refcount_read(dst_pmd) != 1);
 
 	return 0;
 }
@@ -5265,56 +5188,12 @@ int zap_cow_pte(pmd_t *src_pmd,
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
-	printk("%s:\n"
-		"    addr:%lx src owner:%lx dst owner:%lx\n"
-		"    dst:%lx src:%lx mm bytes:%lu\n"
-		"    dst refcount:%d src refcount:%d\n"
-		"    dst_pmd write:%s src_pmd write:%s\n"
-		"    vma:%lx vm_start:%lx vm_end:%lx\n"
-		"    pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
-	       	__func__, addr,
-		(unsigned long)pmd_page(*src_pmd)->cow_pte_owner,
-		(unsigned long)pmd_page(*dst_pmd)->cow_pte_owner,
-		(unsigned long) dst_pmd,
-		(unsigned long) src_pmd,
-		mm_pgtables_bytes(dst_vma->vm_mm),
-		cow_pte_refcount_read(dst_pmd),
-		cow_pte_refcount_read(src_pmd),
-		pmd_write(*dst_pmd) ? "yes" : "no",
-		pmd_write(*src_pmd) ? "yes" : "no",
-		(unsigned long)dst_vma,
-		dst_vma->vm_start, dst_vma->vm_end,
-		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
-		(dst_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
-		(dst_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
-
 	if (cow_pte_is_same(src_pmd, src_pmd)) {
 		set_cow_pte_owner(src_pmd, NULL);
 		cow_pte_rss(dst_mm, dst_vma, dst_pmd, start, end, false /* dec */);
 		mm_dec_nr_ptes(dst_mm);
 	}
 
-	printk( "      addr:%lx src owner:%lx dst owner:%lx\n"
-		"      dst:%lx src:%lx mm bytes:%lu\n"
-		"      dst refcount:%d src refcount:%d\n"
-		"      dst_pmd write:%s src_pmd write:%s\n"
-		"      vma:%lx vm_start:%lx vm_end:%lx\n"
-		"      pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
-	       	addr,
-		(unsigned long)pmd_page(*src_pmd)->cow_pte_owner,
-		(unsigned long)pmd_page(*dst_pmd)->cow_pte_owner,
-		(unsigned long) dst_pmd,
-		(unsigned long) src_pmd,
-		mm_pgtables_bytes(dst_vma->vm_mm),
-		cow_pte_refcount_read(dst_pmd),
-		cow_pte_refcount_read(src_pmd),
-		pmd_write(*dst_pmd) ? "yes" : "no",
-		pmd_write(*src_pmd) ? "yes" : "no",
-		(unsigned long)dst_vma,
-		dst_vma->vm_start, dst_vma->vm_end,
-		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
-		(dst_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
-		(dst_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
 	pmd_clear(dst_pmd);
 	return 0;
 }
@@ -5340,6 +5219,8 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	struct mm_struct *mm = vma->vm_mm;
 	int i, ret = 0;
 	spinlock_t *ptl = NULL;
+	pmd_t cowed_entry;
+
 
 	//if (!(vma->vm_flags & VM_WRITE))
 	//	return 0;
@@ -5368,15 +5249,27 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	//BUG_ON(is_vma_odf_incompatible(vma));
 	//BUG_ON(!pte_page_is_cowing(pmd));
 
-	printk("%s: BEGIN\n"
-	       "    mm pgtables bytes %lu\n"
-	       "    pmd %lx refcount=%d write=%s\n",
-			__func__, mm_pgtables_bytes(mm),
-			(unsigned long) pmd,
-			cow_pte_refcount_read(pmd),
-			pmd_write(*pmd) ? "yes" : "no");
+	cowed_entry = *pmd;
 
-	ptl = pte_lockptr(mm, pmd);
+	printk("%s: BEGIN\n"
+		"    addr:%lx mm bytes:%lu\n"
+		"    refcount:%d\n"
+		"    pmd %lx write:%s\n"
+		"    owner:%lx write:%s\n"
+		"    vma:%lx vm_start:%lx vm_end:%lx\n"
+		"    pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n",
+	       	__func__,
+		addr, mm_pgtables_bytes(mm),
+		cow_pte_refcount_read(pmd),
+		(unsigned long)pmd, pmd_write(*pmd) ? "yes" : "no",
+		(unsigned long)(pmd_page(*pmd)->cow_pte_owner),
+		(pmd_page(*pmd)->cow_pte_owner) ?
+			pmd_write(*pmd_page(*pmd)->cow_pte_owner) ? "yes" : "no"   //xxx cowed_entry may not have owner
+			: "NULL",
+		(unsigned long)vma, vma->vm_start, vma->vm_end,
+		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
+		(vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
+		(vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
 		long x = atomic_long_read(&mm->rss_stat.count[i]);
@@ -5386,28 +5279,54 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		}
 	}
 
+	ptl = pte_lockptr(mm, pmd);
+	spin_lock(ptl);
+
 	if (!alloc) {
-		printk("%s: zap the page\n", __func__);
 		ret = zap_cow_pte(pmd, vma, pmd, addr);
-		printk("%s: zap=%s\n", __func__, ret ? "fallback" : "only dec count");
+	}
+	else {
+		ret = break_cow_pte(pmd, vma, pmd, addr);
+	}
+
+	spin_unlock(ptl);
+
+	if (!alloc) {
+		printk("        zap=%s\n", ret ? "fallback" : "only dec count");
 		ret = 0;
 	}
 	else {
-		printk("%s: break cow\n", __func__);
-		ret = break_cow_pte(pmd, vma, pmd, addr);
-		printk("%s: break cow=%s\n", __func__, ret ? "ENOMEM" : "sucess");
+		printk("        break cow=%s\n", ret ? "ENOMEM" : "sucess");
 	}
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
 		long x = atomic_long_read(&mm->rss_stat.count[i]);
 		if (x) {
-			printk("%s: rss-counter state mm:%p type:%s val:%ld\n",
-				 __func__, mm, resident_page_types[i], x);
+			printk("        rss-counter state mm:%p type:%s val:%ld\n",
+				 mm, resident_page_types[i], x);
 		}
 	}
 
-	spin_unlock(ptl);
-	printk("%s: mm pgtables bytes %lu\nEND\n", __func__, mm_pgtables_bytes(mm));
+	printk( "          addr:%lx mm bytes:%lu\n"
+		"          pmd refcount:%d cowed refcount:%d\n"
+		"          pmd %lx write:%s\n"
+		"          owner:%lx write:%s\n"
+		"          vma:%lx vm_start:%lx vm_end:%lx\n"
+		"          pte page start:%lx pte page end:%lx begin smaller:%s end bigger:%s\n"
+		"END\n",
+		addr, mm_pgtables_bytes(mm),
+		cow_pte_refcount_read(pmd),
+		cow_pte_refcount_read(&cowed_entry),
+		(unsigned long)pmd, pmd_write(*pmd) ? "yes" : "no",
+		(unsigned long)(pmd_page(*pmd)->cow_pte_owner),
+		(pmd_page(*pmd)->cow_pte_owner) ?
+			pmd_write(*pmd_page(*pmd)->cow_pte_owner) ? "yes" : "no"   //xxx cowed_entry may not have owner
+			: "NULL",
+		(unsigned long)vma,
+		vma->vm_start, vma->vm_end,
+		addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
+		(vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
+		(vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
 
 	return ret;
 }

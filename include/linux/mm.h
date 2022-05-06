@@ -689,11 +689,10 @@ static inline bool pte_page_is_cowing(pmd_t *pmd)
 static inline bool set_cow_pte_owner(pmd_t *pmd, pmd_t *owner)
 {
 	struct page *page = pmd_page(*pmd);
-	pmd_t *old = READ_ONCE(page->cow_pte_owner);
-	WRITE_ONCE(page->cow_pte_owner, owner);
-	smp_mb();
-	if (old == NULL)
+	if (smp_load_acquire(&page->cow_pte_owner) == NULL) {
+		smp_store_release(&page->cow_pte_owner, owner);
 		return true;
+	}
 	return false;
 }
 

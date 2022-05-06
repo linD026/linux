@@ -151,14 +151,11 @@ struct page {
 			union {
 				/* protected by page->ptl */
 				pgtable_t pmd_huge_pte;
-				/* cow pte: pmd */
-				pmd_t *cow_pte_owner;
 			};
 			unsigned long _pt_pad_2;	/* mapping */
 			union {
 				struct mm_struct *pt_mm; /* x86 pgds only */
 				atomic_t pt_frag_refcount; /* powerpc */
-				atomic_t cow_pte_refcount; /* cow pgtable */
 			};
 #if ALLOC_SPLIT_PTLOCKS
 			spinlock_t *ptl;
@@ -204,6 +201,10 @@ struct page {
 
 	/* Usage count. *DO NOT USE DIRECTLY*. See page_ref.h */
 	atomic_t _refcount;
+
+	atomic_t cow_pte_refcount; /* cow pgtable */
+	/* cow pte: pmd */
+	pmd_t *cow_pte_owner;
 
 #ifdef CONFIG_MEMCG
 	unsigned long memcg_data;
