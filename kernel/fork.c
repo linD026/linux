@@ -2534,6 +2534,9 @@ fork_out:
 	spin_lock_irq(&current->sighand->siglock);
 	hlist_del_init(&delayed.node);
 	spin_unlock_irq(&current->sighand->siglock);
+
+	if (test_bit(MMF_COW_PGTABLE, &current->mm->flags))
+		printk("%s: failed\n", __func__);
 	return ERR_PTR(retval);
 }
 
@@ -2654,8 +2657,7 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 				}
 			}
 		}
-		smp_mb();
-		clear_bit(MMF_COW_PGTABLE, &current->mm->flags);
+		//clear_bit(MMF_COW_PGTABLE, &current->mm->flags);
 	}
 
 	if (IS_ERR(p))
@@ -2681,8 +2683,8 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 
 
 	/* Disable the flag of child cow on page table */
-	if (p->mm)
-		clear_bit(MMF_COW_PGTABLE, &p->mm->flags);
+	//if (p->mm)
+	//	clear_bit(MMF_COW_PGTABLE, &p->mm->flags);
 
 	wake_up_new_task(p);
 
