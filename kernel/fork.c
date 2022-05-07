@@ -1531,7 +1531,7 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 	return mm;
 
 free_pt:
-	printk("%s: free\n", __func__);
+	cow_pte_print("%s: free\n", __func__);
 	/* don't put binfmt in mmput, we haven't got module yet */
 	mm->binfmt = NULL;
 	mm_init_owner(mm, NULL);
@@ -2234,7 +2234,7 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cleanup_sighand;
 	retval = copy_mm(clone_flags, p);
 	if (retval) {
-		printk("%s: copy_mm failed\n", __func__);
+		cow_pte_print("%s: copy_mm failed\n", __func__);
 		goto bad_fork_cleanup_signal;
 	}
 	retval = copy_namespaces(clone_flags, p);
@@ -2535,8 +2535,8 @@ fork_out:
 	hlist_del_init(&delayed.node);
 	spin_unlock_irq(&current->sighand->siglock);
 
-	if (test_bit(MMF_COW_PGTABLE, &current->mm->flags))
-		printk("%s: failed\n", __func__);
+	if (current->mm && test_bit(MMF_COW_PGTABLE, &current->mm->flags))
+		cow_pte_print("%s: failed\n", __func__);
 	return ERR_PTR(retval);
 }
 
@@ -2645,21 +2645,6 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 
-	/* Disable the flag of parent cow on page table  */
-	if (current->mm) {
-		if (test_bit(MMF_COW_PGTABLE, &current->mm->flags)) {
-			int i;
-			for (i = 0; i < NR_MM_COUNTERS; i++) {
-				long x = atomic_long_read(&p->mm->rss_stat.count[i]);
-				if (x) {
-					printk("%s: child rss-counter state mm:%p type:%s val:%ld\n",
-						 __func__, p->mm, resident_page_types[i], x);
-				}
-			}
-		}
-		//clear_bit(MMF_COW_PGTABLE, &current->mm->flags);
-	}
-
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 
@@ -2753,20 +2738,12 @@ SYSCALL_DEFINE0(sfork)
 		.exit_signal = SIGCHLD,
 	};
 	pid_t pid;
-	int i;
 
 	set_bit(MMF_COW_PGTABLE, &current->mm->flags);
 
-	printk("%s: start\n", __func__);
+	cow_pte_print("%s: start\n", __func__);
 	pid = kernel_clone(&args);
-	for (i = 0; i < NR_MM_COUNTERS; i++) {
-		long x = atomic_long_read(&current->mm->rss_stat.count[i]);
-		if (x) {
-			printk("%s: parent rss-counter state mm:%p type:%s val:%ld\n",
-				 __func__, current->mm, resident_page_types[i], x);
-		}
-	}
-	printk("%s: end\n", __func__);
+	cow_pte_print("%s: end\n", __func__);
 
 	return pid;
 #else

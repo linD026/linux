@@ -202,10 +202,6 @@ struct page {
 	/* Usage count. *DO NOT USE DIRECTLY*. See page_ref.h */
 	atomic_t _refcount;
 
-	atomic_t cow_pte_refcount; /* cow pgtable */
-	/* cow pte: pmd */
-	pmd_t *cow_pte_owner;
-
 #ifdef CONFIG_MEMCG
 	unsigned long memcg_data;
 #endif
@@ -228,6 +224,8 @@ struct page {
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 	int _last_cpupid;
 #endif
+	atomic_t cow_pte_refcount; /* cow pgtable */
+	pmd_t *cow_pte_owner; /* cow pte: pmd */
 } _struct_page_alignment;
 
 /**

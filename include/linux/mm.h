@@ -689,11 +689,8 @@ static inline bool pte_page_is_cowing(pmd_t *pmd)
 static inline bool set_cow_pte_owner(pmd_t *pmd, pmd_t *owner)
 {
 	struct page *page = pmd_page(*pmd);
-	if (smp_load_acquire(&page->cow_pte_owner) == NULL) {
-		smp_store_release(&page->cow_pte_owner, owner);
-		return true;
-	}
-	return false;
+	smp_store_release(&page->cow_pte_owner, owner);
+	return true;
 }
 
 static inline bool cow_pte_is_same(pmd_t *pmd, pmd_t *owner)
@@ -703,6 +700,12 @@ static inline bool cow_pte_is_same(pmd_t *pmd, pmd_t *owner)
 
 int break_cow_pte_range(struct vm_area_struct *vma, unsigned long start_address,
 		unsigned long end_address);
+
+#ifdef CONFIG_DEBUG_VM
+#define cow_pte_print(fmt, ...) printk(fmt, ##__VA_ARGS__)
+#else
+#define cow_pte_print(fmt, ...)
+#endif
 
 /* flush_tlb_range() takes a vma, not a mm, and can care about flags */
 #define TLB_FLUSH_VMA(mm,flags) { .vm_mm = (mm), .vm_flags = (flags) }
