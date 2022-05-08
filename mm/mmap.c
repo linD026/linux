@@ -2709,9 +2709,12 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 			return err;
 	}
 
-	if (handle_cow_pte(vma, NULL, addr, true)) {
-		cow_pte_print("%s: handle_cow_pte failed\n", __func__);
-		return -ENOMEM;
+	if (test_bit(MMF_COW_PGTABLE, &mm->flags)) {
+		int cow_ret = handle_cow_pte(vma, NULL, addr, true);
+		if (cow_ret < 0) {
+			cow_pte_print("%s: handle_cow_pte failed\n", __func__);
+			return -ENOMEM;
+		}
 	}
 
 	new = vm_area_dup(vma);

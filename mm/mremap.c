@@ -534,7 +534,8 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
 		if (!old_pmd)
 			continue;
 
-                if (!pmd_none(*old_pmd) &&
+                if (test_bit(MMF_COW_PGTABLE, &vma->vm_mm->flags) &&
+		    !pmd_none(*old_pmd) &&
                     vma->vm_flags & VM_WRITE &&
                     pte_page_is_cowing(old_pmd) &&
                     !cow_pte_is_same(old_pmd, (pmd_t *)1)

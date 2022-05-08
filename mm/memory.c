@@ -1141,7 +1141,8 @@ out:
 }
 
 static inline bool is_vma_odf_incompatible(struct vm_area_struct *vma) {
-	return (!vma_is_anonymous(vma)) ||
+	return
+		//(!vma_is_anonymous(vma)) ||
 		vma->vm_flags & VM_SHARED ||
 		(vma->vm_start <= vma->vm_mm->brk && vma->vm_end >= vma->vm_mm->start_brk) ;
 }
@@ -1174,22 +1175,48 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 				continue;
 			/* fall through */
 		}
-		if (pmd_none_or_clear_bad(src_pmd))
+
+		if (pmd_none(*src_pmd))
 			continue;
+
+		/* Skip if the pte page owner is src_pmd,
+		 * it already do the cow pte this time fork.
+		 *
+		 * TODO: dst_pmd may no init to zero?
+		 */
+		if (cow_pte_refcount_read(src_pmd) > 1 ||
+		    cow_pte_is_same(dst_pmd, src_pmd)) {
+			cow_pte_print("%s:\n"
+				"    skip, owner:%lx\n"
+				"    src_pmd refcount:%d dst_pmd refcount:%d\n"
+				"    src_pmd write:%s dst_pmd write:%s\n",
+				__func__, (unsigned long)src_pmd,
+				cow_pte_refcount_read(src_pmd),
+				cow_pte_refcount_read(dst_pmd),
+				pmd_write(*src_pmd) ? "yes" : "no",
+				pmd_write(*dst_pmd) ? "yes" : "no"
+				);
+			continue;
+		}
 
 		if (
 		    !test_bit(MMF_COW_PGTABLE, &src_mm->flags) ||
-		    cow_pte_is_same(src_pmd, (pmd_t *) 1) ||
+		      cow_pte_is_same(src_pmd, (pmd_t *) 1) ||
 		    is_vma_odf_incompatible(src_vma)
 		    ) {
 
-			set_cow_pte_owner(src_pmd, (pmd_t *)1);
+			if (pmd_none_or_clear_bad(src_pmd))
+				continue;
 
 			if(copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
 				   addr, next, false)) {
 				cow_pte_print("%s: normal copy pte range failed\n", __func__);
 				return -ENOMEM;
 			}
+
+			set_cow_pte_owner(src_pmd, (pmd_t *) 1);
+			set_cow_pte_owner(dst_pmd, (pmd_t *) 1);
+
 			continue;
 		}
 
@@ -1201,25 +1228,6 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)) {
 			BUG_ON(is_vma_odf_incompatible(src_vma));
 			BUG_ON(cow_pte_is_same(src_pmd, (pmd_t *)1));
-
-			/* Skip if the pte page owner is src_pmd,
-			 * it already do the cow pte this time fork.
-			 *
-			 * TODO: dst_pmd may no init to zero?
-			 */
-			if (!pmd_none(*dst_pmd) && cow_pte_is_same(dst_pmd, src_pmd)) {
-				cow_pte_print("%s:\n"
-					"    skip, owner:%lx\n"
-					"    src_pmd refcount:%d dst_pmd refcount:%d\n"
-					"    src_pmd write:%s dst_pmd write:%s\n",
-					__func__, (unsigned long)src_pmd,
-					cow_pte_refcount_read(src_pmd),
-					cow_pte_refcount_read(dst_pmd),
-					pmd_write(*src_pmd) ? "yes" : "no",
-					pmd_write(*dst_pmd) ? "yes" : "no"
-					);
-				continue;
-			}
 
 			//if (src_vma->vm_flags & VM_WRITE) {
 				pmdp_set_wrprotect(src_mm, addr, src_pmd);
@@ -1585,30 +1593,37 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 			spin_unlock(ptl);
 		}
 
-		/*
-		 * Here there can be other concurrent MADV_DONTNEED or
-		 * trans huge page faults running, and if the pmd is
-		 * none or trans huge it can change under us. This is
-		 * because MADV_DONTNEED holds the mmap_lock in read
-		 * mode.
-		 */
-		if (pmd_none_or_trans_huge_or_clear_bad(pmd)) {
-			goto next;
-		}
-
 		// pmd may become none, so the next if-statement can skip it.
-		if (!pmd_none(*pmd) &&
-		    vma->vm_flags & VM_WRITE &&
+		if (test_bit(MMF_COW_PGTABLE, &tlb->mm->flags) &&
+		    !pmd_none(*pmd) &&
+		    //vma->vm_flags & VM_WRITE &&
 		    pte_page_is_cowing(pmd) &&
 		    !cow_pte_is_same(pmd, (pmd_t *)1)
 		   ) {
+			int cow_ret;
 			cow_pte_print("%s: zap cow pte\n", __func__);
-			handle_cow_pte(vma, pmd, addr, false);
+			cow_ret = handle_cow_pte(vma, pmd, addr, false);
 			cow_pte_print("%s: pmd none:%s (need to be true)\n",
 				__func__, pmd_none(*pmd) ? "true" : "false");
+
+			if (cow_ret == 1)
+				next = zap_pte_range(tlb, vma, pmd, addr,
+						next, details);
 		}
-		else
+		else {
+			/*
+			 * Here there can be other concurrent MADV_DONTNEED or
+			 * trans huge page faults running, and if the pmd is
+			 * none or trans huge it can change under us. This is
+			 * because MADV_DONTNEED holds the mmap_lock in read
+			 * mode.
+			 */
+			if (pmd_none_or_trans_huge_or_clear_bad(pmd)) {
+				goto next;
+			}
+
 			next = zap_pte_range(tlb, vma, pmd, addr, next, details);
+		}
 next:
 		cond_resched();
 	} while (pmd++, addr = next, addr != end);
@@ -4728,6 +4743,7 @@ void cow_pte_fallback(pmd_t *src_pmd,
 	if (cow_pte_is_same(dst_pmd, NULL)) {
 		cow_pte_rss(dst_mm, dst_vma, src_pmd, start, end, true /* inc */);
 		mm_inc_nr_ptes(dst_mm);
+		pmd_populate(dst_mm, src_pmd, pmd_page(*src_pmd));
 	}
 
 	/* we reuse the pte page */
@@ -4763,7 +4779,7 @@ int break_cow_pte(pmd_t *src_pmd,
 
 	if (cow_pte_refcount_read(&cowed_entry) == 1) {
 		cow_pte_fallback(src_pmd, dst_vma, dst_pmd, addr);
-		return 0;
+		return 1;
 	}
 
 	// page fault only
@@ -4821,6 +4837,7 @@ int zap_cow_pte(pmd_t *src_pmd,
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
+	/// some one is still using
 	if (cow_pte_is_same(src_pmd, src_pmd)) {
 		set_cow_pte_owner(src_pmd, NULL);
 		cow_pte_rss(dst_mm, dst_vma, dst_pmd, start, end, false /* dec */);
@@ -4923,10 +4940,9 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 
 	if (!alloc) {
 		cow_pte_print("        zap=%s\n", ret ? "fallback" : "only dec count");
-		ret = 0;
 	}
 	else {
-		cow_pte_print("        break cow=%s\n", ret ? "ENOMEM" : "sucess");
+		cow_pte_print("        break cow=%s\n", ret == 1 ? "fallback" : "sucess");
 	}
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
@@ -5171,17 +5187,19 @@ retry_pud:
 		 * We will allocate new pte and copy old one to it,
 		 * then set this entry writeable and decrease the refcount at pte.
 		 */
-		//if (vmf.flags & FAULT_FLAG_WRITE &&
-		if (!pmd_none(vmf.orig_pmd) &&
-		    vma->vm_flags & VM_WRITE &&
+		if (test_bit(MMF_COW_PGTABLE, &mm->flags) &&
+		    !pmd_none(vmf.orig_pmd) &&
+//		    vma->vm_flags & VM_WRITE &&
 		    pte_page_is_cowing(&vmf.orig_pmd) &&
 		    !cow_pte_is_same(&vmf.orig_pmd, (pmd_t *)1)
 		    ) {
+			int cow_ret;
 			// copy_pte_range will lock the pmd_lock
 			cow_pte_print("%s: begin handle cow pte\n", __func__);
-			if (handle_cow_pte(vmf.vma, vmf.pmd, vmf.real_address,
-				(cow_pte_refcount_read(&vmf.orig_pmd) > 1) ? true : false)) {
-				cow_pte_print("%s: vm fault oom\n", __func__);
+			cow_ret = handle_cow_pte(vmf.vma, vmf.pmd, vmf.real_address,
+				(cow_pte_refcount_read(&vmf.orig_pmd) > 1) ? true : false);
+			if (cow_ret < 0) {
+				cow_pte_print("%s: vm fault oom %d\n", __func__, cow_ret);
 				return VM_FAULT_OOM;
 			}
 			cow_pte_print("%s: end pmd none:%s pmd bad:%s\n", __func__,
