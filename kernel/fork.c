@@ -2642,6 +2642,11 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 			trace = 0;
 	}
 
+	if (clone_flags & CLONE_COW_PGTABLE) {
+		cow_pte_print("%s: start\n", __func__);
+		set_bit(MMF_COW_PGTABLE, &current->mm->flags);
+	}
+
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 
@@ -2894,7 +2899,8 @@ static bool clone3_args_valid(struct kernel_clone_args *kargs)
 {
 	/* Verify that no unknown flags are passed along. */
 	if (kargs->flags &
-	    ~(CLONE_LEGACY_FLAGS | CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP))
+	    ~(CLONE_LEGACY_FLAGS | CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP |
+		    CLONE_COW_PGTABLE))
 		return false;
 
 	/*
@@ -2945,7 +2951,12 @@ SYSCALL_DEFINE2(clone3, struct clone_args __user *, uargs, size_t, size)
 	if (!clone3_args_valid(&kargs))
 		return -EINVAL;
 
-	return kernel_clone(&kargs);
+	err = kernel_clone(&kargs);
+
+	if (test_bit(MMF_COW_PGTABLE, &current->mm->flags))
+		cow_pte_print("%s: end\n", __func__);
+
+	return err;
 }
 #endif
 
