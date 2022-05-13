@@ -595,8 +595,7 @@ static inline int pmd_get_pte(pmd_t *pmd)
 	return atomic_inc_return(&pmd_page(*pmd)->cow_pte_refcount);
 }
 
-extern void cow_pte_fallback(pmd_t *src_pmd,
-		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
+extern void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
 		unsigned long addr);
 
 static inline int pmd_put_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
@@ -614,7 +613,7 @@ static inline int pmd_put_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned l
 	 *
 	 */
 	if (!atomic_add_unless(&pmd_page(*pmd)->cow_pte_refcount, -1, 1)) {
-		cow_pte_fallback(pmd, vma, pmd, addr);
+		cow_pte_fallback(vma, pmd, addr);
 		return 1;
 	}
 	return 0;

@@ -1142,7 +1142,7 @@ out:
 
 static inline bool is_vma_odf_incompatible(struct vm_area_struct *vma) {
 	return
-		//(!vma_is_anonymous(vma)) ||
+		(!vma_is_anonymous(vma)) ||
 		vma->vm_flags & VM_SHARED ||
 		(vma->vm_start <= vma->vm_mm->brk && vma->vm_end >= vma->vm_mm->start_brk) ;
 }
@@ -1187,10 +1187,12 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		if (cow_pte_refcount_read(src_pmd) > 1 ||
 		    cow_pte_is_same(dst_pmd, src_pmd)) {
 			cow_pte_print("%s:\n"
-				"    skip, owner:%lx\n"
+				"    skip, child:%lx owner:%lx\n"
 				"    src_pmd refcount:%d dst_pmd refcount:%d\n"
 				"    src_pmd write:%s dst_pmd write:%s\n",
-				__func__, (unsigned long)src_pmd,
+				__func__,
+				(unsigned long)dst_pmd,
+				(unsigned long)src_pmd,
 				cow_pte_refcount_read(src_pmd),
 				cow_pte_refcount_read(dst_pmd),
 				pmd_write(*src_pmd) ? "yes" : "no",
@@ -1204,6 +1206,7 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		      cow_pte_is_same(src_pmd, (pmd_t *) 1) ||
 		    is_vma_odf_incompatible(src_vma)
 		    ) {
+			BUG_ON(pmd_trans_huge(*src_pmd));
 
 			if (pmd_none_or_clear_bad(src_pmd))
 				continue;
@@ -4688,15 +4691,15 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
 	return VM_FAULT_FALLBACK;
 }
 
-void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
-		pmd_t *src_pmdp, unsigned long addr, unsigned long end, bool inc_dec)
+void cow_pte_rss(struct mm_struct *mm, struct vm_area_struct *vma,
+		pmd_t *pmdp, unsigned long addr, unsigned long end, bool inc_dec)
 {
 	int rss[NR_MM_COUNTERS];
 	pte_t *orig_ptep, *ptep;
 	struct page *page;
 	init_rss_vec(rss);
 
-	ptep = pte_offset_map(src_pmdp, addr);
+	ptep = pte_offset_map(pmdp, addr);
 	orig_ptep = ptep;
 	arch_enter_lazy_mmu_mode();
 	do {
@@ -4704,7 +4707,7 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
 			continue;
 		}
 
-		page = vm_normal_page(src_vma, addr, *ptep);
+		page = vm_normal_page(vma, addr, *ptep);
 		if (page) {
 			if (inc_dec)
 				rss[mm_counter(page)]++;
@@ -4714,7 +4717,7 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
 		}
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
 	arch_leave_lazy_mmu_mode();
-	add_mm_rss_vec(dst_mm, rss);
+	add_mm_rss_vec(mm, rss);
 	pte_unmap(orig_ptep);
 }
 
@@ -4725,34 +4728,33 @@ void cow_pte_rss(struct mm_struct *dst_mm, struct vm_area_struct *src_vma,
  *   - After break parent:   [child , rss=0, ref=1, write=NO , owner=NULL  ]
  *                        to [child , rss=1, ref=1, write=YES, owner=NULL  ]
  */
-void cow_pte_fallback(pmd_t *src_pmd,
-		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
+void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
 		unsigned long addr)
 {
-	struct mm_struct *dst_mm = dst_vma->vm_mm;
+	struct mm_struct *mm = vma->vm_mm;
 	unsigned long start, end;
 	pmd_t new;
 
-	BUG_ON(pmd_write(*dst_pmd));
-	BUG_ON(cow_pte_refcount_read(dst_pmd) != 1);
+	BUG_ON(pmd_write(*pmd));
+	BUG_ON(cow_pte_refcount_read(pmd) != 1);
 
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
 	// if we are not owner, we need to increase the rss.
-	if (cow_pte_is_same(dst_pmd, NULL)) {
-		cow_pte_rss(dst_mm, dst_vma, src_pmd, start, end, true /* inc */);
-		mm_inc_nr_ptes(dst_mm);
-		pmd_populate(dst_mm, src_pmd, pmd_page(*src_pmd));
+	if (cow_pte_is_same(pmd, NULL)) {
+		cow_pte_rss(mm, vma, pmd, start, end, true /* inc */);
+		mm_inc_nr_ptes(mm);
+		pmd_populate(mm, pmd, pmd_page(*pmd));
 	}
 
 	/* we reuse the pte page */
-	set_cow_pte_owner(src_pmd, NULL);
-	new = pmd_mkwrite(*src_pmd);
-	set_pmd_at(dst_mm, addr, dst_pmd, new);
+	set_cow_pte_owner(pmd, NULL);
+	new = pmd_mkwrite(*pmd);
+	set_pmd_at(mm, addr, pmd, new);
 
-	BUG_ON(!pmd_write(*dst_pmd));
-	BUG_ON(pmd_page(*dst_pmd)->cow_pte_owner);
+	BUG_ON(!pmd_write(*pmd));
+	BUG_ON(pmd_page(*pmd)->cow_pte_owner);
 }
 
 /* Break cow pte for page fault:
@@ -4767,18 +4769,16 @@ void cow_pte_fallback(pmd_t *src_pmd,
  *     - inc rss if we are not owner
  *
  */
-int break_cow_pte(pmd_t *src_pmd,
-		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
-		unsigned long addr)
+int break_cow_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
 {
-	struct mm_struct *dst_mm = dst_vma->vm_mm;
+	struct mm_struct *mm = vma->vm_mm;
 	unsigned long start, end;
-	pmd_t cowed_entry = *src_pmd;
+	pmd_t cowed_entry = *pmd;
 	unsigned long debug_pagetable_bytes;
 
 
 	if (cow_pte_refcount_read(&cowed_entry) == 1) {
-		cow_pte_fallback(src_pmd, dst_vma, dst_pmd, addr);
+		cow_pte_fallback(vma, pmd, addr);
 		return 1;
 	}
 
@@ -4790,19 +4790,19 @@ int break_cow_pte(pmd_t *src_pmd,
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
 	// DEBUG BEGIN
-	debug_pagetable_bytes = mm_pgtables_bytes(dst_mm);
+	debug_pagetable_bytes = mm_pgtables_bytes(mm);
 	// DBUG END
 
-	pmd_clear(dst_pmd);
-	if(copy_pte_range(dst_vma, dst_vma, dst_pmd, &cowed_entry,
+	pmd_clear(pmd);
+	if(copy_pte_range(vma, vma, pmd, &cowed_entry,
 				start, end, true))
 		return -ENOMEM;
 
 	// DEBUG BEGIN
-	BUG_ON(mm_pgtables_bytes(dst_mm) - debug_pagetable_bytes != PAGE_SIZE);
+	BUG_ON(mm_pgtables_bytes(mm) - debug_pagetable_bytes != PAGE_SIZE);
 	// DEBUG END
 
-	if (cow_pte_is_same(&cowed_entry, src_pmd)) {
+	if (cow_pte_is_same(&cowed_entry, pmd)) {
 		// here we are owner, so clear the ownership.
 		// to preserve rss correct we need to decrease.
 		//
@@ -4810,26 +4810,24 @@ int break_cow_pte(pmd_t *src_pmd,
 		// and he want to reuse the page,
 		// he must need to increase the rss.
 		set_cow_pte_owner(&cowed_entry, NULL);
-		cow_pte_rss(dst_mm, dst_vma, dst_pmd, start, end, false /* dec */);
-		mm_dec_nr_ptes(dst_mm);
+		cow_pte_rss(mm, vma, pmd, start, end, false /* dec */);
+		mm_dec_nr_ptes(mm);
 	}
 
-	pmd_put_pte(dst_vma, &cowed_entry, addr);
+	pmd_put_pte(vma, &cowed_entry, addr);
 
-	BUG_ON(!pmd_write(*dst_pmd));
-	BUG_ON(cow_pte_refcount_read(dst_pmd) != 1);
+	BUG_ON(!pmd_write(*pmd));
+	BUG_ON(cow_pte_refcount_read(pmd) != 1);
 
 	return 0;
 }
 
 // TODO tlb flush
-int zap_cow_pte(pmd_t *src_pmd,
-		struct vm_area_struct *dst_vma, pmd_t *dst_pmd,
-		unsigned long addr)
+int zap_cow_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
 {
-	struct mm_struct *dst_mm = dst_vma->vm_mm;
+	struct mm_struct *mm = vma->vm_mm;
 	unsigned long start, end;
-	if (pmd_put_pte(dst_vma, src_pmd, addr)) {
+	if (pmd_put_pte(vma, pmd, addr)) {
 		// fallback
 		return 1;
 	}
@@ -4838,13 +4836,13 @@ int zap_cow_pte(pmd_t *src_pmd,
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
 	/// some one is still using
-	if (cow_pte_is_same(src_pmd, src_pmd)) {
-		set_cow_pte_owner(src_pmd, NULL);
-		cow_pte_rss(dst_mm, dst_vma, dst_pmd, start, end, false /* dec */);
-		mm_dec_nr_ptes(dst_mm);
+	if (cow_pte_is_same(pmd, pmd)) {
+		set_cow_pte_owner(pmd, NULL);
+		cow_pte_rss(mm, vma, pmd, start, end, false /* dec */);
+		mm_dec_nr_ptes(mm);
 	}
 
-	pmd_clear(dst_pmd);
+	pmd_clear(pmd);
 	return 0;
 }
 
@@ -4928,15 +4926,15 @@ int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		}
 	}
 
+	ptl = pte_lockptr(mm, pmd);
+	spin_lock(ptl);
 	if (!alloc) {
-		ret = zap_cow_pte(pmd, vma, pmd, addr);
+		ret = zap_cow_pte(vma, pmd, addr);
 	}
 	else {
-		ptl = pte_lockptr(mm, pmd);
-		spin_lock(ptl);
-		ret = break_cow_pte(pmd, vma, pmd, addr);
-		spin_unlock(ptl);
+		ret = break_cow_pte(vma, pmd, addr);
 	}
+	spin_unlock(ptl);
 
 	if (!alloc) {
 		cow_pte_print("        zap=%s\n", ret ? "fallback" : "only dec count");
@@ -5190,6 +5188,7 @@ retry_pud:
 		if (test_bit(MMF_COW_PGTABLE, &mm->flags) &&
 		    !pmd_none(vmf.orig_pmd) &&
 //		    vma->vm_flags & VM_WRITE &&
+//		    vmf->flags & FAULT_FLAG_WRITE &&
 		    pte_page_is_cowing(&vmf.orig_pmd) &&
 		    !cow_pte_is_same(&vmf.orig_pmd, (pmd_t *)1)
 		    ) {
@@ -5202,14 +5201,29 @@ retry_pud:
 				cow_pte_print("%s: vm fault oom %d\n", __func__, cow_ret);
 				return VM_FAULT_OOM;
 			}
-			cow_pte_print("%s: end pmd none:%s pmd bad:%s\n", __func__,
+			cow_pte_print("%s: end pmd:%lx write:%s none:%s bad:%s\n",
+					__func__,
+				(unsigned long) vmf.pmd,
+				pmd_write(*vmf.pmd) ? "true" : "false",
 				pmd_none(*vmf.pmd) ? "true" : "false",
 				pmd_bad(*vmf.pmd) ? "true" : "false");
 			// broke the cow pte
 		}
 	}
 
-	return handle_pte_fault(&vmf);
+	cow_pte_cond_print(mm, "%s: pmd:%lx none:%s\n",
+			__func__, (unsigned long)vmf.pmd,
+			vmf.pmd ?
+			pmd_none(*vmf.pmd) ? "true" : "false"
+			: "NULL" );
+
+	ret = handle_pte_fault(&vmf);
+	cow_pte_cond_print(mm, "%s: after pte fault "
+			   "fault retry=%s error=%s\n",
+			   __func__,
+			   vmf.flags & VM_FAULT_RETRY ? "true" : "false",
+		       	   vmf.flags & VM_FAULT_ERROR ? "true" : "false");
+	return ret;
 }
 
 /**

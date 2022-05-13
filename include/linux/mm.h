@@ -703,8 +703,15 @@ int break_cow_pte_range(struct vm_area_struct *vma, unsigned long start_address,
 
 #ifdef CONFIG_DEBUG_VM
 #define cow_pte_print(fmt, ...) printk(fmt, ##__VA_ARGS__)
+#define cow_pte_cond_print(mm, fmt, ...) \
+	do {\
+		if ((mm) && test_bit(MMF_COW_PGTABLE, &(mm)->flags)) {\
+			printk(fmt, ##__VA_ARGS__);\
+		}\
+	} while (0)
 #else
 #define cow_pte_print(fmt, ...)
+#define cow_pte_cond_print(mm, fmt, ...)
 #endif
 
 /* flush_tlb_range() takes a vma, not a mm, and can care about flags */
