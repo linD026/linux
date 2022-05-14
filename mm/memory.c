@@ -1419,6 +1419,7 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 struct zap_details {
 	struct folio *single_folio;	/* Locked folio to be unmapped */
 	bool even_cows;			/* Zap COWed private pages too? */
+	bool cow_pte;			/* Cow pte */
 };
 
 /* Whether we should zap all COWed (private) pages too */
@@ -1481,8 +1482,9 @@ again:
 			page = vm_normal_page(vma, addr, ptent);
 			if (unlikely(!should_zap_page(details, page)))
 				continue;
-			ptent = ptep_get_and_clear_full(mm, addr, pte,
-							tlb->fullmm);
+			if (!details || !details->cow_pte)
+				ptent = ptep_get_and_clear_full(mm, addr, pte,
+								tlb->fullmm);
 			tlb_remove_tlb_entry(tlb, pte, addr);
 			if (unlikely(!page))
 				continue;
@@ -1496,8 +1498,10 @@ again:
 				    likely(!(vma->vm_flags & VM_SEQ_READ)))
 					mark_page_accessed(page);
 			}
-			rss[mm_counter(page)]--;
-			page_remove_rmap(page, vma, false);
+			if (!details || !details->cow_pte) {
+				rss[mm_counter(page)]--;
+				page_remove_rmap(page, vma, false);
+			}
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
 			if (unlikely(__tlb_remove_page(tlb, page))) {
@@ -1507,6 +1511,8 @@ again:
 			}
 			continue;
 		}
+
+		// TODO: Deal with cow pte with swap
 
 		entry = pte_to_swp_entry(ptent);
 		if (is_device_private_entry(entry) ||
@@ -1604,14 +1610,24 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		    !cow_pte_is_same(pmd, (pmd_t *)1)
 		   ) {
 			int cow_ret;
+			struct zap_details cow_pte_details = {0};
+
+			if (details)
+				cow_pte_details = *details;
+
 			cow_pte_print("%s: zap cow pte\n", __func__);
 			cow_ret = handle_cow_pte(vma, pmd, addr, false);
 			cow_pte_print("%s: pmd none:%s (need to be true)\n",
 				__func__, pmd_none(*pmd) ? "true" : "false");
 
-			if (cow_ret == 1)
-				next = zap_pte_range(tlb, vma, pmd, addr,
-						next, details);
+			if (cow_ret != 1)
+				cow_pte_details.cow_pte = true;
+			next = zap_pte_range(tlb, vma, pmd, addr,
+						next, &cow_pte_details);
+			if (details) {
+				cow_pte_details.cow_pte = false;
+				*details = cow_pte_details;
+			}
 		}
 		else {
 			/*
@@ -4718,7 +4734,6 @@ void cow_pte_rss(struct mm_struct *mm, struct vm_area_struct *vma,
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
 	arch_leave_lazy_mmu_mode();
 	add_mm_rss_vec(mm, rss);
-	pte_unmap(orig_ptep);
 }
 
 /* Fallback for page fault:
@@ -4745,6 +4760,7 @@ void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
 	if (cow_pte_is_same(pmd, NULL)) {
 		cow_pte_rss(mm, vma, pmd, start, end, true /* inc */);
 		mm_inc_nr_ptes(mm);
+		smp_wmb();
 		pmd_populate(mm, pmd, pmd_page(*pmd));
 	}
 
@@ -5211,18 +5227,7 @@ retry_pud:
 		}
 	}
 
-	cow_pte_cond_print(mm, "%s: pmd:%lx none:%s\n",
-			__func__, (unsigned long)vmf.pmd,
-			vmf.pmd ?
-			pmd_none(*vmf.pmd) ? "true" : "false"
-			: "NULL" );
-
 	ret = handle_pte_fault(&vmf);
-	cow_pte_cond_print(mm, "%s: after pte fault "
-			   "fault retry=%s error=%s\n",
-			   __func__,
-			   vmf.flags & VM_FAULT_RETRY ? "true" : "false",
-		       	   vmf.flags & VM_FAULT_ERROR ? "true" : "false");
 	return ret;
 }
 
