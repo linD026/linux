@@ -1147,6 +1147,9 @@ static inline bool is_vma_odf_incompatible(struct vm_area_struct *vma) {
 		(vma->vm_start <= vma->vm_mm->brk && vma->vm_end >= vma->vm_mm->start_brk) ;
 }
 
+void cow_pte_rss(struct mm_struct *mm, struct vm_area_struct *vma,
+		pmd_t *pmdp, unsigned long addr, unsigned long end, bool inc_dec);
+
 static inline int
 copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	       pud_t *dst_pud, pud_t *src_pud, unsigned long addr,
@@ -1179,13 +1182,10 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		if (pmd_none(*src_pmd))
 			continue;
 
-		/* Skip if the pte page owner is src_pmd,
-		 * it already do the cow pte this time fork.
-		 *
-		 * TODO: dst_pmd may no init to zero?
+		/* XXX: Skip if the pte table already COW this time.
+		 * We need to consider the COW pgtable fork for twice times.
 		 */
-		if (cow_pte_refcount_read(src_pmd) > 1 ||
-		    cow_pte_is_same(dst_pmd, src_pmd)) {
+		if (!pmd_none(*dst_pmd) && cow_pte_refcount_read(src_pmd) > 1) {
 			cow_pte_print("%s:\n"
 				"    skip, child:%lx owner:%lx\n"
 				"    src_pmd refcount:%d dst_pmd refcount:%d\n"
@@ -1234,18 +1234,37 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 //			BUG_ON(is_vma_odf_incompatible(src_vma));
 //			BUG_ON(cow_pte_is_same(src_pmd, (pmd_t *)1));
 
-			//if (src_vma->vm_flags & VM_WRITE) {
-				pmdp_set_wrprotect(src_mm, addr, src_pmd);
-			//}
-
 			/* if there doesn't have owner the parent need to
 			 * take this pte.
 			 */
 			if (cow_pte_is_same(src_pmd, NULL)) {
 				set_cow_pte_owner(src_pmd, src_pmd);
+				/* XXX: Its may COW PTE two times, but
+				 * owner has cleared. (Child COW PTE forking)
+				 * At this situation, we need to add back the
+				 * rss state and pgtable bytes.
+				 */
+				if (!pmd_write(*src_pmd)) {
+					unsigned long pte_start =
+						addr & PMD_MASK;
+					unsigned long pte_end =
+						(addr + PMD_SIZE) & PMD_MASK;
+					cow_pte_rss(src_mm, src_vma, src_pmd,
+					    pte_start, pte_end, true /* inc */);
+					mm_inc_nr_ptes(src_mm);
+					smp_wmb();
+					pmd_populate(src_mm, src_pmd,
+							pmd_page(*src_pmd));
+				}
+
 				// parent already set 1 at allocation time
 				// pmd_get_pte(src_pmd);
 			}
+
+			//if (src_vma->vm_flags & VM_WRITE) {
+				pmdp_set_wrprotect(src_mm, addr, src_pmd);
+			//}
+
 
 			/* Child reference count */
 			pmd_get_pte(src_pmd);
@@ -1508,6 +1527,8 @@ again:
 				rss[mm_counter(page)]--;
 				page_remove_rmap(page, vma, false);
 			}
+			else
+				continue;
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
 			if (unlikely(__tlb_remove_page(tlb, page))) {
@@ -1626,7 +1647,7 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 			cow_pte_print("%s: pmd none:%s (need to be true)\n",
 				__func__, pmd_none(*pmd) ? "true" : "false");
 
-			if (cow_ret != 1)
+			if (cow_ret != 1) {
 				cow_pte_details.cow_pte = true;
 			next = zap_pte_range(tlb, vma, pmd, addr,
 						next, &cow_pte_details);
@@ -1634,8 +1655,12 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 				cow_pte_details.cow_pte = false;
 				*details = cow_pte_details;
 			}
+			}
 		}
 		else {
+			if (details)
+				details->cow_pte = false;
+
 			/*
 			 * Here there can be other concurrent MADV_DONTNEED or
 			 * trans huge page faults running, and if the pmd is
@@ -4763,7 +4788,7 @@ void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
 	end = (addr + PMD_SIZE) & PMD_MASK;
 
 	// if we are not owner, we need to increase the rss.
-	if (cow_pte_is_same(pmd, NULL)) {
+	if (!cow_pte_is_same(pmd, pmd)) {
 		cow_pte_rss(mm, vma, pmd, start, end, true /* inc */);
 		mm_inc_nr_ptes(mm);
 		smp_wmb();
@@ -4783,8 +4808,10 @@ void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
  * - two state here
  *   - After sfork:   [parent, rss=1, ref=2, write=NO , owner=parent]
  *                 to [parent, rss=1, ref=1, write=YES, owner=NULL  ]
+ *                    COW PTE become [ref=1, write=NO , owner=NULL  ]
  *                    [child , rss=0, ref=2, write=NO , owner=parent]
- *                 to [child , rss=1, ref=1, write=YES, owner=parent]
+ *                 to [child , rss=1, ref=1, write=YES, owner=NULL  ]
+ *                    COW PTE become [ref=1, write=NO , owner=parent]
  *   NOTE
  *     - copy the cow pte to new pte.
  *     - clear the owner of cow pte and set our pmd entry writable when we are owner
@@ -4806,7 +4833,7 @@ int break_cow_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
 
 	// page fault only
 	BUG_ON(pmd_write(cowed_entry));
-	BUG_ON(!pmd_page(cowed_entry)->cow_pte_owner);
+	//BUG_ON(!pmd_page(cowed_entry)->cow_pte_owner);
 
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;
@@ -4844,7 +4871,6 @@ int break_cow_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
 	return 0;
 }
 
-// TODO tlb flush
 int zap_cow_pte(struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr)
 {
 	struct mm_struct *mm = vma->vm_mm;
