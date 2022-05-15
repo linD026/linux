@@ -2636,6 +2636,9 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 			trace = 0;
 	}
 
+	if (static_branch_unlikely(&cow_pte_enabled))
+		set_bit(MMF_COW_PGTABLE, &current->mm->flags);
+
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 

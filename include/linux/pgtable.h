@@ -912,6 +912,13 @@ static inline void ptep_modify_prot_commit(struct vm_area_struct *vma,
 	__ptep_modify_prot_commit(vma, addr, ptep, pte);
 }
 #endif /* __HAVE_ARCH_PTEP_MODIFY_PROT_TRANSACTION */
+
+extern int cow_pte_handler(struct ctl_table *table, int write,
+		void *buffer, size_t *lenp, loff_t *ppos);
+
+extern int sysctl_cow_pte_enabled;
+extern struct static_key_false cow_pte_enabled;
+
 #endif /* CONFIG_MMU */
 
 /*
