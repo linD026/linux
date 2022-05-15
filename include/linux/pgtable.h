@@ -590,6 +590,20 @@ static inline int pte_unused(pte_t pte)
 }
 #endif
 
+static inline bool set_cow_pte_owner(pmd_t *pmd, pmd_t *owner)
+{
+	struct page *page = pmd_page(*pmd);
+
+	smp_store_release(&page->cow_pte_owner, owner);
+	return true;
+}
+
+static inline bool cow_pte_owner_is_same(pmd_t *pmd, pmd_t *owner)
+{
+	return (smp_load_acquire(&pmd_page(*pmd)->cow_pte_owner) == owner) ?
+		true : false;
+}
+
 #ifndef pte_access_permitted
 #define pte_access_permitted(pte, write) \
 	(pte_present(pte) && (!(write) || pte_write(pte)))
