@@ -1201,6 +1201,7 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 			continue;
 		}
 
+		/*
 		if (
 		    !test_bit(MMF_COW_PGTABLE, &src_mm->flags) ||
 		      cow_pte_is_same(src_pmd, (pmd_t *) 1) ||
@@ -1222,6 +1223,7 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 
 			continue;
 		}
+		*/
 
 
 		/* IF have owner and vma is not the owner
@@ -1229,8 +1231,8 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		 * Since, vma may overlap the previously pte that cowed already.
 		 */
 		if (test_bit(MMF_COW_PGTABLE, &src_mm->flags)) {
-			BUG_ON(is_vma_odf_incompatible(src_vma));
-			BUG_ON(cow_pte_is_same(src_pmd, (pmd_t *)1));
+//			BUG_ON(is_vma_odf_incompatible(src_vma));
+//			BUG_ON(cow_pte_is_same(src_pmd, (pmd_t *)1));
 
 			//if (src_vma->vm_flags & VM_WRITE) {
 				pmdp_set_wrprotect(src_mm, addr, src_pmd);
@@ -1267,6 +1269,10 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 				addr & PMD_MASK, (addr + PMD_SIZE) & PMD_MASK,
 				(src_vma->vm_start < (addr & PMD_MASK)) ? "vma" : "pte table",
 				(src_vma->vm_end < ((addr + PMD_SIZE) & PMD_MASK)) ? "pte table" : "vma");
+		}
+		else if(!pmd_none_or_clear_bad(src_pmd) && copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
+			   addr, next, false)) {
+			return -ENOMEM;
 		}
 	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
 	return 0;
