@@ -2329,6 +2329,7 @@ static inline bool pgtable_pte_page_ctor(struct page *page)
 	__SetPageTable(page);
 	inc_lruvec_page_state(page, NR_PAGETABLE);
 	page->cow_pte_owner = NULL;
+	atomic_set(&page->cow_pgtable_refcount, 1);
 	return true;
 }
 

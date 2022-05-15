@@ -4597,6 +4597,7 @@ void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
 	pmd_t new;
 
 	BUG_ON(pmd_write(*pmd));
+	BUG_ON(cow_pte_refcount_read(pmd) != 1);
 
 	start = addr & PMD_MASK;
 	end = (addr + PMD_SIZE) & PMD_MASK;

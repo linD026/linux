@@ -604,6 +604,33 @@ static inline bool cow_pte_owner_is_same(pmd_t *pmd, pmd_t *owner)
 		true : false;
 }
 
+extern void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
+		unsigned long addr);
+
+static inline int pmd_get_pte(pmd_t *pmd)
+{
+	return atomic_inc_return(&pmd_page(*pmd)->cow_pgtable_refcount);
+}
+
+/* If the COW PTE page->cow_pgtable_refcount is 1, instead of decreasing the
+ * counter, clear write protection of the corresponding PMD entry and reset
+ * the COW PTE owner to reuse the table.
+ */
+static inline int pmd_put_pte(struct vm_area_struct *vma, pmd_t *pmd,
+		unsigned long addr)
+{
+	if (!atomic_add_unless(&pmd_page(*pmd)->cow_pgtable_refcount, -1, 1)) {
+		cow_pte_fallback(vma, pmd, addr);
+		return 1;
+	}
+	return 0;
+}
+
+static inline int cow_pte_refcount_read(pmd_t *pmd)
+{
+	return atomic_read(&pmd_page(*pmd)->cow_pgtable_refcount);
+}
+
 #ifndef pte_access_permitted
 #define pte_access_permitted(pte, write) \
 	(pte_present(pte) && (!(write) || pte_write(pte)))
