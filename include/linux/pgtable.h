@@ -629,6 +629,9 @@ static inline int cow_pte_refcount_read(pmd_t *pmd)
 	return page_count(pmd_page(*pmd));
 }
 
+int handle_cow_pte(struct vm_area_struct *vma, pmd_t *pmd,
+			  unsigned long addr, bool alloc);
+
 #ifndef pte_access_permitted
 #define pte_access_permitted(pte, write) \
 	(pte_present(pte) && (!(write) || pte_write(pte)))
