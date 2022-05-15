@@ -1000,6 +1000,33 @@ page_copy_prealloc(struct mm_struct *src_mm, struct vm_area_struct *vma,
 	return new_page;
 }
 
+static inline void cow_pte_rss(struct mm_struct *mm, struct vm_area_struct *vma,
+			       pmd_t *pmdp, unsigned long addr, unsigned long end, bool inc_dec)
+{
+	int rss[NR_MM_COUNTERS];
+	pte_t *ptep;
+	struct page *page;
+
+	init_rss_vec(rss);
+
+	ptep = pte_offset_map(pmdp, addr);
+	arch_enter_lazy_mmu_mode();
+	do {
+		if (pte_none(*ptep) || pte_special(*ptep))
+			continue;
+
+		page = vm_normal_page(vma, addr, *ptep);
+		if (page) {
+			if (inc_dec)
+				rss[mm_counter(page)]++;
+			else
+				rss[mm_counter(page)]--;
+		}
+	} while (ptep++, addr += PAGE_SIZE, addr != end);
+	arch_leave_lazy_mmu_mode();
+	add_mm_rss_vec(mm, rss);
+}
+
 static int
 copy_pte_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	       pmd_t *dst_pmd, pmd_t *src_pmd, unsigned long addr,
@@ -4552,6 +4579,44 @@ static vm_fault_t wp_huge_pud(struct vm_fault *vmf, pud_t orig_pud)
 		return vmf->vma->vm_ops->huge_fault(vmf, PE_SIZE_PUD);
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 	return VM_FAULT_FALLBACK;
+}
+
+/* COW PTE fallback to normal PTE:
+ * - two state here
+ *   - After break child :   [parent, rss=1, ref=1, write=NO , owner=parent]
+ *                        to [parent, rss=1, ref=1, write=YES, owner=NULL  ]
+ *   - After break parent:   [child , rss=0, ref=1, write=NO , owner=NULL  ]
+ *                        to [child , rss=1, ref=1, write=YES, owner=NULL  ]
+ */
+void cow_pte_fallback(struct vm_area_struct *vma, pmd_t *pmd,
+		      unsigned long addr)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	unsigned long start, end;
+	pmd_t new;
+
+	BUG_ON(pmd_write(*pmd));
+
+	start = addr & PMD_MASK;
+	end = (addr + PMD_SIZE) & PMD_MASK;
+
+	/* If pmd is not owner, it needs to increase the rss.
+	 * Since only the owner has the RSS state for the COW PTE.
+	 */
+	if (!cow_pte_owner_is_same(pmd, pmd)) {
+		cow_pte_rss(mm, vma, pmd, start, end, true /* inc */);
+		mm_inc_nr_ptes(mm);
+		smp_wmb();
+		pmd_populate(mm, pmd, pmd_page(*pmd));
+	}
+
+	/* Reuse the pte page */
+	set_cow_pte_owner(pmd, NULL);
+	new = pmd_mkwrite(*pmd);
+	set_pmd_at(mm, addr, pmd, new);
+
+	BUG_ON(!pmd_write(*pmd));
+	BUG_ON(pmd_page(*pmd)->cow_pte_owner);
 }
 
 /*
